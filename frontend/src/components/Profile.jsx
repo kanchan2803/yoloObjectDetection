@@ -1,28 +1,27 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import Navbar, { BottomNav } from './Navbar';
+import Icon from './Icon';
 
 export default function Profile() {
   const navigate = useNavigate();
-  const { user, logout } = useAuth();
-  
-  // State to hold the data we fetch from the backend
-  const [customObjects, setCustomObjects] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const { user, logout, loading } = useAuth();
 
-  // Fetch the user's custom objects when the page loads
+  const [customObjects, setCustomObjects] = useState([]);
+  const [isDataLoading, setIsDataLoading] = useState(true);
+
   useEffect(() => {
+    if (!user) return;
+
     const fetchObjects = async () => {
       const token = localStorage.getItem('token');
-      if (!token) return;
+      if (!token) { setIsDataLoading(false); return; }
 
       try {
         const response = await fetch('http://localhost:5000/api/objects', {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
+          headers: { 'Authorization': `Bearer ${token}` }
         });
-        
         if (response.ok) {
           const data = await response.json();
           setCustomObjects(data);
@@ -30,17 +29,28 @@ export default function Profile() {
       } catch (error) {
         console.error("Failed to fetch custom objects:", error);
       } finally {
-        setIsLoading(false);
+        setIsDataLoading(false);
       }
     };
 
     fetchObjects();
-  }, []);
+  }, [user]);
 
   const handleLogout = () => {
     logout();
     navigate('/');
   };
+
+  if (loading) {
+    return (
+      <div className="page-container">
+        <Navbar />
+        <div className="page-content" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="progress_activity" size={32} style={{ color: 'var(--primary)', animation: 'spin 1s linear infinite' }} />
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     navigate('/login');
@@ -48,71 +58,154 @@ export default function Profile() {
   }
 
   return (
-    <div style={styles.pageContainer}>
-      <h1 style={styles.heading}>Your Profile</h1>
-      
-      <div style={styles.infoCard}>
-        <p style={styles.infoText}><strong>Account:</strong> {user.email}</p>
-        <p style={styles.infoText}><strong>Status:</strong> {user.role}</p>
-      </div>
+    <div className="page-container">
+      <Navbar />
 
-      <div style={styles.actionSection}>
-        <button onClick={() => navigate('/upload')} style={styles.actionButton}>
-          ➕ Add New Custom Object
-        </button>
-        
-        <button onClick={() => navigate('/')} style={styles.primaryButton}>
-          📷 Open Camera Assistant
-        </button>
-      </div>
-
-      {/* --- NEW: Display the Custom Objects Grid --- */}
-      <h2 style={styles.subHeading}>My Taught Objects</h2>
-      
-      {isLoading ? (
-        <p style={styles.text}>Loading your items...</p>
-      ) : customObjects.length === 0 ? (
-        <p style={styles.text}>You haven't taught the AI any custom objects yet.</p>
-      ) : (
-        <div style={styles.grid}>
-          {customObjects.map((obj) => (
-            <div key={obj._id} style={styles.card}>
-              <img 
-                // We point the image source directly to the Express static folder
-                // The .replace() ensures it works on Windows machines which use backslashes
-                src={`http://localhost:5000/${obj.imagePath.replace('\\', '/')}`} 
-                alt={obj.label} 
-                style={styles.cardImage}
-              />
-              <div style={styles.cardLabel}>{obj.label}</div>
+      <div className="page-content page-content-wide">
+        {/* Profile header card */}
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 24, marginBottom: 24, padding: '28px 32px' }}>
+          <div style={{ position: 'relative' }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: '50%',
+              background: 'linear-gradient(135deg, #AAC7FF, #3E90FF)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: '3px solid var(--surface-container-highest)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.3)'
+            }}>
+              <Icon name="person" size={36} style={{ color: 'var(--on-primary)' }} />
             </div>
-          ))}
+            {/* Verified badge */}
+            <div style={{
+              position: 'absolute', bottom: -2, right: -2,
+              width: 24, height: 24, borderRadius: '50%',
+              background: 'var(--primary-container)', border: '2px solid var(--surface-container-low)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>
+              <Icon name="verified" fill size={14} style={{ color: '#fff' }} />
+            </div>
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 style={{ fontSize: 28, fontWeight: 900, margin: '0 0 8px', letterSpacing: '-0.02em' }}>
+              {user.role === 'admin' ? 'Visual Navigator' : 'Visual Navigator'}
+            </h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--on-surface-variant)', fontSize: 14 }}>
+              <span>{user.email}</span>
+              <div style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: 'var(--primary)', opacity: 0.6
+              }} />
+            </div>
+          </div>
         </div>
-      )}
-      {/* ----------------------------------------- */}
 
-      <button onClick={handleLogout} style={styles.dangerButton}>
-        Log Out
-      </button>
+        {/* Quick action buttons */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 32 }}>
+          <button
+            onClick={() => navigate('/upload')}
+            className="btn btn-outline btn-lg"
+            style={{ gap: 8 }}
+          >
+            <Icon name="model_training" size={20} />
+            Teach AI
+          </button>
+          <button
+            onClick={() => navigate('/')}
+            className="btn btn-primary btn-lg"
+            style={{ gap: 8 }}
+          >
+            <Icon name="photo_camera" size={20} />
+            Open Camera
+          </button>
+        </div>
+
+        {/* My Taught Objects section */}
+        <div style={{ marginBottom: 40 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            marginBottom: 20
+          }}>
+            <h2 style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>My Taught Objects</h2>
+            <span style={{
+              background: 'var(--surface-container-highest)',
+              padding: '4px 12px',
+              borderRadius: 'var(--radius-full)',
+              fontSize: 11,
+              fontWeight: 700,
+              color: 'var(--on-surface-variant)',
+              textTransform: 'uppercase',
+              letterSpacing: 1
+            }}>
+              {customObjects.length} Objects
+            </span>
+          </div>
+
+          {isDataLoading ? (
+            <div style={{ textAlign: 'center', padding: '40px 0' }}>
+              <Icon name="progress_activity" size={32} style={{ color: 'var(--outline)', animation: 'spin 1s linear infinite' }} />
+              <p style={{ color: 'var(--outline)', marginTop: 12, fontSize: 14 }}>Loading your items...</p>
+            </div>
+          ) : customObjects.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-state-icon">
+                <Icon name="center_focus_weak" size={32} style={{ color: 'var(--outline)' }} />
+              </div>
+              <p style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>No objects taught yet</p>
+              <p style={{ fontSize: 14, color: 'var(--outline)', margin: 0, maxWidth: 320, lineHeight: 1.6 }}>
+                Start teaching Drishti to recognize personal items in your environment for better spatial awareness.
+              </p>
+              <button
+                onClick={() => navigate('/upload')}
+                style={{
+                  background: 'none', border: 'none', color: 'var(--primary)',
+                  fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  textTransform: 'uppercase', letterSpacing: 1, marginTop: 8
+                }}
+              >
+                Learn how it works <Icon name="arrow_forward" size={16} />
+              </button>
+            </div>
+          ) : (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+              gap: 14
+            }}>
+              {customObjects.map((obj) => (
+                <div key={obj._id} className="card" style={{
+                  padding: 0, overflow: 'hidden', cursor: 'default',
+                  transition: 'var(--transition)'
+                }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--primary)'; e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'rgba(53,53,53,0.2)'; e.currentTarget.style.transform = 'translateY(0)'; }}
+                >
+                  <img
+                    src={`http://localhost:5000/${obj.imagePath.replace('\\', '/')}`}
+                    alt={obj.label}
+                    style={{ width: '100%', height: 140, objectFit: 'cover', display: 'block' }}
+                  />
+                  <div style={{
+                    padding: '10px 12px', fontSize: 14, fontWeight: 700, textAlign: 'center'
+                  }}>
+                    {obj.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div style={{ height: 1, background: 'var(--outline-variant)', margin: '8px 0 24px' }} />
+
+        {/* Sign Out */}
+        <button onClick={handleLogout} className="btn btn-danger btn-lg" style={{ gap: 8 }}>
+          <Icon name="logout" size={20} />
+          Sign Out
+        </button>
+      </div>
+
+      <BottomNav />
     </div>
   );
 }
-
-const styles = {
-  pageContainer: { minHeight: '100dvh', backgroundColor: '#000000', color: '#FFFFFF', padding: '20px', fontFamily: 'system-ui, sans-serif' },
-  heading: { fontSize: '32px', marginBottom: '20px', fontWeight: 'bold' },
-  subHeading: { fontSize: '24px', marginTop: '40px', marginBottom: '16px', fontWeight: 'bold', borderBottom: '1px solid #38383A', paddingBottom: '10px' },
-  text: { fontSize: '18px', color: '#A1A1A6' },
-  infoCard: { backgroundColor: '#1C1C1E', padding: '20px', borderRadius: '16px', marginBottom: '30px' },
-  infoText: { fontSize: '18px', margin: '10px 0', color: '#EBEBF5' },
-  actionSection: { display: 'flex', flexDirection: 'column', gap: '16px' },
-  actionButton: { padding: '18px', fontSize: '20px', fontWeight: 'bold', backgroundColor: '#32D74B', color: '#000000', border: 'none', borderRadius: '30px', cursor: 'pointer' },
-  primaryButton: { padding: '18px', fontSize: '20px', fontWeight: 'bold', backgroundColor: '#0A84FF', color: '#FFFFFF', border: 'none', borderRadius: '30px', cursor: 'pointer' },
-  dangerButton: { padding: '18px', fontSize: '20px', fontWeight: 'bold', backgroundColor: 'transparent', color: '#FF3B30', border: '2px solid #FF3B30', borderRadius: '30px', cursor: 'pointer', marginTop: '40px', width: '100%' },
-  
-  // New Grid Styles
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '16px' },
-  card: { backgroundColor: '#1C1C1E', borderRadius: '12px', overflow: 'hidden', border: '1px solid #38383A' },
-  cardImage: { width: '100%', height: '150px', objectFit: 'cover' },
-  cardLabel: { padding: '12px', fontSize: '16px', fontWeight: 'bold', textAlign: 'center' }
-};
