@@ -1,361 +1,347 @@
-/**
- * useDrishtiVoice.jsx — Fixed version
- *
- * KEY FIXES:
- * 1. handleVoiceCommand now uses a stable ref (commandHandlerRef) so it can
- *    call restartVoiceSelection even though that function is defined below it.
- *    Previously this was a closure temporal dead zone bug causing silent failures.
- *
- * 2. Recognition restart logic now uses a flag (shouldResumeListeningRef) that
- *    is set to false before stopListening(), preventing ghost restarts.
- *
- * 3. onVoiceLog callback added — every recognized utterance is sent to the log
- *    so users can see what Drishti heard, confirmed or not.
- *
- * 4. No re-instantiation while a recognition instance exists. The old code could
- *    create two simultaneous instances if onend fired while isListening was stale.
- */
-
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MODES } from '../components/DrishtiConstants';
 
-const MODE_ALIASES = {
-  NORMAL:     ['normal', 'regular', 'default', 'standard'],
-  HOME:       ['home', 'indoor', 'house', 'inside'],
-  OUTDOOR:    ['outdoor', 'outside', 'street', 'travel'],
-  SHOPPING:   ['shopping', 'shop', 'store', 'market'],
-  SOCIAL:     ['social', 'people', 'friends', 'conversation'],
-  PATHFINDER: ['pathfinder', 'path', 'navigation', 'navigate', 'finder'],
-  EMERGENCY:  ['emergency', 'danger', 'alert', 'help'],
-  SILENT:     ['silent', 'mute', 'stop', 'pause', 'quiet'],
-};
+export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated) {
+  const recognitionRef = useRef(null);
+  const synth = window.speechSynthesis;
+  const [isListening, setIsListening] = useState(false);
 
-function getSpeechRecognitionConstructor() {
-  return (typeof window !== 'undefined')
-    ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
-    : null;
-}
+  // 1. Core Speech Function with Callback
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const speechQueue = useRef([]);
 
-function normalizeTranscript(transcript = '') {
-  return transcript
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+  // // 1. Core Speech Function with Queuing Logic
+  // const speak = (text, interrupt = false, onEndCallback = null) => {
+  //   if (interrupt) {
+  //     synth.cancel();
+  //     speechQueue.current = []; // Clear queue on priority interrupt
+  //     setIsSpeaking(false);
+  //   }
 
-export default function useDrishtiVoice({
-  setCurrentMode,
-  setIsMuted,
-  onModeActivated,
-  speak,
-  playStartupSequence,
-  onRestartSelection,
-  onToggleMute,
-  onVoiceLog,        // NEW: (text: string) => void  — called with what was heard
-}) {
-  const recognitionRef       = useRef(null);
-  const shouldResumeRef      = useRef(false);   // controls auto-restart
-  const retryTimeoutRef      = useRef(null);
-  const commandHandlerRef    = useRef(null);    // stable ref to avoid closure stale bug
-  const restartRef           = useRef(null);    // stable ref to restartVoiceSelection
+  //   // Add message to queue
+  //   speechQueue.current.push({ text, onEndCallback });
 
-  const [isListening,    setIsListening]    = useState(false);
-  const [voiceError,     setVoiceError]     = useState('');
-  const [lastHeard,      setLastHeard]      = useState('');
+  //   const processQueue = () => {
+  //     if (speechQueue.current.length === 0 || synth.speaking) return;
 
-  const isVoiceSupported = useMemo(() => Boolean(getSpeechRecognitionConstructor()), []);
+  //     const nextItem = speechQueue.current.shift();
+  //     const utterance = new SpeechSynthesisUtterance(nextItem.text);
+  //     utterance.rate = 1.1;
+  //     utterance.pitch = 1.0;
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  //     utterance.onstart = () => setIsSpeaking(true);
+      
+  //     utterance.onend = () => {
+  //       setIsSpeaking(false);
+  //       if (nextItem.onEndCallback) nextItem.onEndCallback();
+  //       setTimeout(processQueue, 150);
+  //     };
 
-  const clearRetry = () => {
-    if (retryTimeoutRef.current) {
-      clearTimeout(retryTimeoutRef.current);
-      retryTimeoutRef.current = null;
+  //     utterance.onerror = () => setIsSpeaking(false);
+  //     synth.speak(utterance);
+  //   };
+
+  //   processQueue();
+  // };
+
+  const speak = (text, interrupt = true, onEndCallback = null) => {
+    if (interrupt) synth.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+    
+    if (onEndCallback) {
+      utterance.onend = onEndCallback;
     }
+    
+    synth.speak(utterance);
+    return utterance;
   };
 
-  /**
-   * Hard stop — kills recognition instance and disables auto-restart.
-   * Safe to call multiple times.
-   */
-  const stopListening = () => {
-    shouldResumeRef.current = false;
-    clearRetry();
-    if (recognitionRef.current) {
-      try {
-        // Remove onend BEFORE calling stop() to prevent the onend → scheduleRestart
-        // chain from firing one final time after we've deliberately stopped.
-        recognitionRef.current.onend   = null;
-        recognitionRef.current.onerror = null;
-        recognitionRef.current.onresult = null;
-        recognitionRef.current.stop();
-      } catch (_) { /* already stopped */ }
-      recognitionRef.current = null;
+  // 2. Modified Startup Sequence
+  const playStartupSequence = async () => {
+    const speakReady = (msg) => new Promise(resolve => speak(msg, true, resolve));
+    const speakNext = (msg) => new Promise(resolve => speak(msg, false, resolve));
+
+    await speakReady("Hi, this is Drishti. Camera and microphone active.");
+    await speakNext("Choose a mode. Available options are:");
+    
+    for (const modeKey of Object.keys(MODES)) {
+      if (modeKey === "SILENT") continue;
+      await speakNext(MODES[modeKey].label);
     }
-    setIsListening(false);
-  };
-
-  /**
-   * Schedule a fresh recognition instance after a short delay.
-   * Only runs if shouldResumeRef is still true.
-   */
-  const scheduleRestart = () => {
-    clearRetry();
-    retryTimeoutRef.current = setTimeout(() => {
-      if (shouldResumeRef.current && !recognitionRef.current) {
-        startListening({ announceRetry: false });
-      }
-    }, 1000);
-  };
-
-  // ── mode activation ───────────────────────────────────────────────────────
-
-  const activateMode = (modeKey) => {
-    const nextMode = MODES[modeKey] ? modeKey : 'NORMAL';
-    const label    = MODES[nextMode]?.label || nextMode;
-
-    stopListening(); // must come before setCurrentMode to prevent restart race
-    setVoiceError('');
-    setCurrentMode(nextMode);
-    setIsMuted(nextMode === 'SILENT');
-    speak(`${label} activated.`, true);
-    if (onModeActivated) onModeActivated(nextMode);
-    if (onVoiceLog) onVoiceLog(`▶ Mode activated: ${label}`, 'system');
-  };
-
-  const resolveModeFromTranscript = (normalized) => {
-    for (const [modeKey, aliases] of Object.entries(MODE_ALIASES)) {
-      if (aliases.some(alias => normalized.includes(alias))) return modeKey;
-    }
-    for (const [modeKey, mode] of Object.entries(MODES)) {
-      const modeName = normalizeTranscript(mode.label);
-      if (modeName && normalized.includes(modeName)) return modeKey;
-    }
-    return null;
-  };
-
-  // ── command handler ───────────────────────────────────────────────────────
-  // Defined as a regular function (not arrow, not useCallback) and stored in a
-  // ref so recognition.onresult can always call the *latest* version without
-  // React closure staleness. This is the fix for the original silent-failure bug.
-
-  function handleVoiceCommand(transcript) {
-    const normalized = normalizeTranscript(transcript);
-    if (!normalized) return;
-
-    setLastHeard(transcript.trim());
-    if (onVoiceLog) onVoiceLog(`🎙 "${transcript.trim()}"`, 'voice');
-
-    // ── help ──
-    if (normalized.includes('help') || normalized.includes('what can i say')) {
-      speak('You can say normal, home, outdoor, shopping, social, pathfinder, emergency, silent, mute, unmute, or restart.', true);
-      return;
-    }
-
-    // ── restart ──
-    if (normalized.includes('restart') || normalized.includes('start again') || normalized.includes('reset')) {
-      if (restartRef.current) restartRef.current({ withPrompt: true });
-      return;
-    }
-
-    // ── unmute ──
-    if (normalized.includes('unmute') || normalized.includes('resume voice') || normalized.includes('resume narration')) {
-      if (onToggleMute) onToggleMute(false);
-      speak('Narration resumed.', true);
-      if (onVoiceLog) onVoiceLog('✅ Unmuted', 'system');
-      return;
-    }
-
-    // ── mute ──
-    if (normalized.includes('mute') || normalized.includes('quiet') || normalized.includes('stop speaking')) {
-      if (onToggleMute) onToggleMute(true);
-      speak('Narration muted. Say unmute to hear updates again.', true);
-      if (onVoiceLog) onVoiceLog('🔇 Muted', 'system');
-      return;
-    }
-
-    // ── deactivate / stop system ──
-    if (normalized.includes('deactivate') || normalized.includes('stop system') || normalized.includes('turn off')) {
-      speak('Drishti deactivating. Say restart to resume.', true);
-      if (onVoiceLog) onVoiceLog('⏹ System deactivated by voice', 'system');
-      setCurrentMode('SILENT');
-      setIsMuted(true);
-      return;
-    }
-
-    // ── mode selection ──
-    const modeKey = resolveModeFromTranscript(normalized);
-    if (modeKey) {
-      activateMode(modeKey);
-      return;
-    }
-
-    // ── unknown ──
-    speak('Mode not recognized. Say normal, home, outdoor, shopping, pathfinder, emergency, or silent.', true);
-    if (onVoiceLog) onVoiceLog(`❓ Not recognized: "${transcript.trim()}"`, 'system');
-  }
-
-  // Keep commandHandlerRef current every render so onresult always has latest
-  commandHandlerRef.current = handleVoiceCommand;
-
-  // ── startListening ───────────────────────────────────────────────────────
-
-  const startListening = ({ announceRetry = true } = {}) => {
-    const SpeechRecognition = getSpeechRecognitionConstructor();
-
-    if (!SpeechRecognition) {
-      setVoiceError('Voice commands are not supported in this browser. Use the mode buttons below.');
-      return false;
-    }
-
-    // Guard: don't create a second instance if one is already running
-    if (recognitionRef.current) return true;
-
-    clearRetry();
-    shouldResumeRef.current = true;
-
-    let recognition;
-    try {
-      recognition = new SpeechRecognition();
-    } catch (err) {
-      setVoiceError('Could not start voice recognition. Use mode buttons.');
-      return false;
-    }
-
-    // Settings: continuous + interim so we can show live "lastHeard" updates
-    recognition.continuous      = true;
-    recognition.interimResults  = true;
-    recognition.maxAlternatives = 3;
-    recognition.lang            = 'en-IN'; // works well for Indian English + global English
-
-    recognition.onstart = () => {
-      setVoiceError('');
-      setIsListening(true);
-    };
-
-    recognition.onresult = (event) => {
-      // We process ALL results, not just the latest, to handle quick utterances
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result     = event.results[i];
-        const transcript = result[0]?.transcript || '';
-
-        if (result.isFinal) {
-          // Final result: pass to command handler via stable ref
-          commandHandlerRef.current?.(transcript);
-        } else {
-          // Interim: just show it in the UI as "currently hearing"
-          setLastHeard(transcript.trim());
-        }
-      }
-    };
-
-    recognition.onerror = (event) => {
-      setIsListening(false);
-      recognitionRef.current = null;
-
-      if (event.error === 'no-speech') {
-        // This fires frequently on silence — it's normal, just restart quietly
-        if (shouldResumeRef.current) scheduleRestart();
-        return;
-      }
-
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        shouldResumeRef.current = false;
-        setVoiceError('Microphone blocked. Allow mic access or choose a mode manually.');
-        return;
-      }
-
-      if (event.error === 'aborted') {
-        // We caused this intentionally via recognition.stop() — not an error
-        return;
-      }
-
-      setVoiceError(`Voice error: ${event.error}. Tap mic to retry.`);
-      if (shouldResumeRef.current) scheduleRestart();
-    };
-
-    recognition.onend = () => {
-      recognitionRef.current = null;
-      setIsListening(false);
-      // Auto-restart only if we haven't been deliberately stopped
-      if (shouldResumeRef.current) scheduleRestart();
-    };
-
-    recognitionRef.current = recognition;
-    try {
-      recognition.start();
-    } catch (err) {
-      recognitionRef.current = null;
-      setVoiceError('Could not start listening. Tap mic to retry.');
-      return false;
-    }
-
-    return true;
-  };
-
-  // ── restartVoiceSelection ────────────────────────────────────────────────
-
-  const restartVoiceSelection = ({ withPrompt = true } = {}) => {
-    stopListening();
-    setCurrentMode('SILENT');
-    setIsMuted(true);
-    setLastHeard('');
-
-    if (withPrompt) {
-      speak('Listening for mode selection.', true, () => {
-        startListening({ announceRetry: false });
-      });
-    } else {
-      // Small delay so any in-flight TTS doesn't collide with mic open
-      setTimeout(() => startListening({ announceRetry: false }), 300);
-    }
-  };
-
-  // Store in ref so commandHandlerRef can call it without stale closure
-  restartRef.current = restartVoiceSelection;
-
-  // ── launchModeSelection ──────────────────────────────────────────────────
-
-  const launchModeSelection = () => {
-    setCurrentMode('SILENT');
-    setIsMuted(true);
-    setLastHeard('');
-
-    const modeLabels = Object.values(MODES)
-      .filter(m => m.id !== 'SILENT')
-      .map(m => m.label.replace(/\bMode\b/g, '').trim());
-
-    playStartupSequence(modeLabels, () => {
-      // Start listening only after the entire startup sequence finishes speaking
-      startListening({ announceRetry: false });
+    
+    speak("Speak the name of a mode now.", false, () => {
+        startListening();
     });
   };
 
-  const handleScreenInteraction = () => restartVoiceSelection({ withPrompt: true });
-
-  // ── keyboard shortcut ────────────────────────────────────────────────────
-  useEffect(() => {
-    const onKeyDown = (e) => {
-      if (e.key.toLowerCase() === 's') handleScreenInteraction();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      stopListening();
-      clearRetry();
-    };
-  }, []);
-
-  return {
-    isListening,
-    isVoiceSupported,
-    voiceError,
-    lastHeard,
-    startListening,
-    stopListening,
-    launchModeSelection,
-    restartVoiceSelection,
-    handleScreenInteraction,
+  // 3. Voice Command Handler
+  const handleVoiceCommand = (transcript) => {
+    const command = transcript.toLowerCase();
+    for (const [key, mode] of Object.entries(MODES)) {
+      if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
+        activateMode(key);
+        return;
+      }
+    }
   };
+
+  // Helper to unify activation logic
+  const activateMode = (key) => {
+    setCurrentMode(key);
+    const label = MODES[key]?.label || key;
+    speak(`${label} activated. System starting.`);
+    setIsMuted(key === "SILENT");
+    stopListening();
+    if (onModeActivated) onModeActivated();
+  };
+
+  // 4. Recognition Lifecycle
+  const startListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition || isListening) return;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.lang = 'en-US';
+    recognition.onstart = () => setIsListening(true);
+    recognition.onresult = (event) => {
+      const transcript = event.results[event.results.length - 1][0].transcript;
+      handleVoiceCommand(transcript);
+    };
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current) recognitionRef.current.stop();
+  };
+
+  // 5. NEW: Keyboard Listener for 'S' key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key.toLowerCase() === 's') {
+        // Force system into Silent mode state
+        setCurrentMode("SILENT");
+        setIsMuted(true);
+        synth.cancel();
+        speak("Silent mode activated. Listening for new mode.", true, () => {
+          startListening();
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onModeActivated]); // Dependencies ensure fresh callback access
+
+  // 6. UPDATED: Interaction logic (Now triggers state change)
+  const handleScreenInteraction = () => {
+    // Stop everything and prepare for new command
+    setCurrentMode("SILENT");
+    setIsMuted(true);
+    speak("System paused. Listening for command.", true, () => {
+      startListening();
+    });
+  };
+
+  return { speak, playStartupSequence, handleScreenInteraction, isListening, stopListening };
 }
+
+// import { useEffect, useRef, useState } from 'react';
+// import { MODES } from '../components/DrishtiConstants';
+
+// export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated) {
+//   const recognitionRef = useRef(null);
+//   const synth = window.speechSynthesis;
+//   const [isListening, setIsListening] = useState(false);
+
+//   // 1. Core Speech Function with Callback
+//   const speak = (text, interrupt = true, onEndCallback = null) => {
+//     if (interrupt) synth.cancel();
+//     const utterance = new SpeechSynthesisUtterance(text);
+//     utterance.rate = 1.1;
+//     utterance.pitch = 1.0;
+    
+//     if (onEndCallback) {
+//       utterance.onend = onEndCallback;
+//     }
+    
+//     synth.speak(utterance);
+//     return utterance;
+//   };
+
+//   // 2. Modified Startup Sequence
+//   const playStartupSequence = async () => {
+//     // We use promises to ensure one sentence finishes before the next starts
+//     const speakReady = (msg) => new Promise(resolve => speak(msg, true, resolve));
+//     const speakNext = (msg) => new Promise(resolve => speak(msg, false, resolve));
+
+//     await speakReady("Hi, this is Drishti. Camera and microphone active.");
+//     await speakNext("Choose a mode. Available options are:");
+    
+//     for (const modeKey of Object.keys(MODES)) {
+//       if (modeKey === "SILENT") continue;
+//       await speakNext(MODES[modeKey].label);
+//     }
+    
+//     speak("Speak the name of a mode now.", false, () => {
+//         startListening();
+//     });
+//   };
+
+//   const handleVoiceCommand = (transcript) => {
+//     const command = transcript.toLowerCase();
+//     for (const [key, mode] of Object.entries(MODES)) {
+//       if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
+//         setCurrentMode(key);
+//         speak(`${mode.label} activated. System starting.`);
+//         setIsMuted(key === "SILENT");
+//         stopListening();
+//         if (onModeActivated) onModeActivated(); // Notify CameraView to start inference
+//         return;
+//       }
+//     }
+//   };
+
+//   const startListening = () => {
+//     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+//     if (!SpeechRecognition || isListening) return;
+//     const recognition = new SpeechRecognition();
+//     recognition.continuous = true;
+//     recognition.lang = 'en-US';
+//     recognition.onstart = () => setIsListening(true);
+//     recognition.onresult = (event) => {
+//       const transcript = event.results[event.results.length - 1][0].transcript;
+//       handleVoiceCommand(transcript);
+//     };
+//     recognition.onend = () => setIsListening(false);
+//     recognitionRef.current = recognition;
+//     recognition.start();
+//   };
+
+//   const stopListening = () => {
+//     if (recognitionRef.current) recognitionRef.current.stop();
+//   };
+
+//   const handleScreenInteraction = () => {
+//     speak("System paused. Listening for command.", true, startListening);
+//   };
+
+//   return { speak, playStartupSequence, handleScreenInteraction, isListening, stopListening };
+// }
+
+// import { useEffect, useRef, useState } from 'react';
+// import { MODES } from '../components/DrishtiConstants';
+
+// export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted) {
+//   const recognitionRef = useRef(null);
+//   const synth = window.speechSynthesis;
+//   const [isListening, setIsListening] = useState(false);
+
+//   // 1. Core Speech Function
+//   const speak = (text, interrupt = true) => {
+//     if (interrupt) synth.cancel();
+//     const utterance = new SpeechSynthesisUtterance(text);
+//     utterance.rate = 1.1;
+//     utterance.pitch = 1.0;
+//     synth.speak(utterance);
+//     return utterance;
+//   };
+
+//   // 2. The Startup Sequence (Greeting + Mode List)
+//   const playStartupSequence = async () => {
+//     speak("Hi, this is Drishti. Camera and microphone active.");
+    
+//     // Small delay to let the user settle
+//     await new Promise(r => setTimeout(r, 2500));
+    
+//     speak("Choose a mode. Available options are:");
+    
+//     // Announce each mode clearly
+//     for (const modeKey of Object.keys(MODES)) {
+//       if (modeKey === "SILENT") continue;
+//       speak(MODES[modeKey].label, false);
+//       await new Promise(r => setTimeout(r, 1200));
+//     }
+    
+//     speak("Speak the name of a mode now.");
+//     startListening();
+//   };
+
+//   // 3. Command Handler
+//   const handleVoiceCommand = (transcript) => {
+//     const command = transcript.toLowerCase();
+//     console.log("Drishti Heard:", command);
+
+//     for (const [key, mode] of Object.entries(MODES)) {
+//       if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
+//         setCurrentMode(key);
+//         speak(`${mode.label} activated. System starting.`);
+        
+//         if (key === "SILENT") setIsMuted(true);
+//         else setIsMuted(false);
+        
+//         stopListening();
+//         return;
+//       }
+//     }
+
+//     if (command.includes("stop") || command.includes("silent")) {
+//       setCurrentMode("SILENT");
+//       setIsMuted(true);
+//       speak("Silent mode activated.");
+//     }
+//   };
+
+//   // 4. Recognition Lifecycle
+//   const startListening = () => {
+//     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+//     if (!SpeechRecognition || isListening) return;
+
+//     const recognition = new SpeechRecognition();
+//     recognition.continuous = true;
+//     recognition.interimResults = false;
+//     recognition.lang = 'en-US';
+
+//     recognition.onstart = () => setIsListening(true);
+//     recognition.onresult = (event) => {
+//       const transcript = event.results[event.results.length - 1][0].transcript;
+//       handleVoiceCommand(transcript);
+//     };
+//     recognition.onend = () => setIsListening(false);
+
+//     recognitionRef.current = recognition;
+//     recognition.start();
+//   };
+
+//   const stopListening = () => {
+//     if (recognitionRef.current) {
+//       recognitionRef.current.stop();
+//     }
+//   };
+
+//   // 5. Interaction Listeners (Keyboard + Double Tap)
+//   useEffect(() => {
+//     const handleKeyDown = (e) => {
+//       if (e.key.toLowerCase() === 's') {
+//         setCurrentMode("SILENT");
+//         setIsMuted(true);
+//         speak("Silent mode activated. Listening for new mode.");
+//         startListening();
+//       }
+//     };
+
+//     window.addEventListener('keydown', handleKeyDown);
+//     return () => window.removeEventListener('keydown', handleKeyDown);
+//   }, []);
+
+//   const handleScreenInteraction = () => {
+//     // This is called by the double-tap logic in the main view
+//     speak("System paused. Listening for command.");
+//     startListening();
+//   };
+
+//   return { speak, playStartupSequence, handleScreenInteraction, isListening };
+// }

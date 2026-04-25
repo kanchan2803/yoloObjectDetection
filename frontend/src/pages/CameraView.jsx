@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import useDrishtiAI from '../hooks/useDrishtiAI';
-import useDrishtiAudio from '../hooks/useDrishtiAudio';
-import useCustomObjectMatcher from '../hooks/useCustomObjectMatcher';
 import useDrishtiVoice from '../hooks/useDrishtiVoice';
 import { MODES } from '../components/DrishtiConstants';
 import Navbar from '../components/Navbar';
@@ -10,12 +8,15 @@ import Icon from '../components/Icon';
 
 export default function CameraView() {
   const navigate = useNavigate();
-
   const handleSafeNavigate = (path) => {
     setIsSystemActive(false);
     setSystemStatus("Deactivated");
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-    const safetyTimeout = setTimeout(() => navigate(path), 1500);
+
+    const safetyTimeout = setTimeout(() => {
+      navigate(path);
+    }, 1500);
+
     speak("Drishti deactivated.", true, () => {
       clearTimeout(safetyTimeout);
       navigate(path);
@@ -24,6 +25,7 @@ export default function CameraView() {
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const lastSpokenRef = useRef(0);
   const idleTimerRef = useRef(null);
 
   const [currentMode, setCurrentMode] = useState("NORMAL");
@@ -31,7 +33,6 @@ export default function CameraView() {
   const [eventLog, setEventLog] = useState([]);
   const [systemStatus, setSystemStatus] = useState("Initializing...");
   const [isSystemActive, setIsSystemActive] = useState(false);
-  const [isLogExpanded, setIsLogExpanded] = useState(false);
 
   const onModeActivated = useCallback(() => {
     setIsSystemActive(true);
@@ -39,55 +40,15 @@ export default function CameraView() {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
   }, []);
 
-  const handleVoiceMuteToggle = useCallback((nextMuted) => {
-    if (typeof nextMuted === 'boolean') {
-      if (nextMuted) { window.speechSynthesis.cancel(); setIsMuted(true); }
-      else setIsMuted(false);
-      return;
-    }
-    setIsMuted((value) => {
-      if (!value) window.speechSynthesis.cancel();
-      return !value;
-    });
-  }, []);
+  const { speak, playStartupSequence, handleScreenInteraction } = useDrishtiVoice(
+    currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated
+  );
 
-  const audio = useDrishtiAudio(isMuted);
-  const { speak, playStartupSequence, announce } = audio;
-  const { references: customReferences } = useCustomObjectMatcher();
+  const { isModelLoaded, fps, activeDetections, isPathSafe, confidence, runInference } = useDrishtiAI(
+    videoRef, speak, lastSpokenRef
+  );
 
-  // Voice log: adds entries for what the user says + system voice events
-  const addVoiceLogEntry = useCallback((text, type = 'voice') => {
-    const entry = {
-      id: Date.now() + Math.random(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      text,
-      type, // 'voice' | 'detection' | 'system'
-    };
-    setEventLog(prev => [entry, ...prev].slice(0, 30));
-  }, []);
-
-  const {
-    handleScreenInteraction,
-    launchModeSelection,
-    restartVoiceSelection,
-    stopListening,
-    isListening,
-    isVoiceSupported,
-    voiceError,
-    lastHeard,
-  } = useDrishtiVoice({
-    setCurrentMode,
-    setIsMuted,
-    onModeActivated,
-    speak,
-    playStartupSequence,
-    onToggleMute: handleVoiceMuteToggle,
-    onVoiceLog: addVoiceLogEntry,
-  });
-
-  const { isModelLoaded, fps, activeDetections, isPathSafe, confidence, runInference } = useDrishtiAI(videoRef, customReferences);
-
-  // 1. Startup
+  // 1. Startup Logic
   useEffect(() => {
     const startSystem = async () => {
       try {
@@ -96,9 +57,10 @@ export default function CameraView() {
           audio: true
         });
         if (videoRef.current) videoRef.current.srcObject = stream;
+
         if (isModelLoaded && !isSystemActive) {
-          setSystemStatus("Ready for voice selection");
-          launchModeSelection();
+          setSystemStatus("Waiting for Mode...");
+          playStartupSequence();
           resetIdleTimer();
         }
       } catch (err) {
@@ -112,23 +74,21 @@ export default function CameraView() {
   const resetIdleTimer = () => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = setTimeout(() => {
-      if (!isSystemActive) { launchModeSelection(); resetIdleTimer(); }
+      if (!isSystemActive) {
+        playStartupSequence();
+        resetIdleTimer();
+      }
     }, 40000);
   };
 
+  // 2. Controlled Inference Loop
   useEffect(() => {
-    if (isSystemActive) return;
-    if (voiceError) { setSystemStatus('Voice assistance needs attention'); return; }
-    if (isListening) { setSystemStatus('Listening for mode'); return; }
-    if (isModelLoaded) setSystemStatus('Ready for voice selection');
-  }, [isListening, isModelLoaded, isSystemActive, voiceError]);
-
-  // 2. Inference loop
-  useEffect(() => {
-    if (isModelLoaded && isSystemActive) runInference(currentMode);
+    if (isModelLoaded && isSystemActive) {
+      runInference(currentMode);
+    }
   }, [isModelLoaded, currentMode, isSystemActive]);
 
-  // 3. Canvas drawing
+  // 3. Canvas Drawing Logic
   useEffect(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -142,11 +102,18 @@ export default function CameraView() {
     ctx.strokeStyle = "rgba(170, 199, 255, 0.1)";
     ctx.lineWidth = 1;
     ctx.setLineDash([5, 5]);
+
     for (let i = 1; i < 3; i++) {
-      ctx.beginPath(); ctx.moveTo((canvas.width / 3) * i, 0); ctx.lineTo((canvas.width / 3) * i, canvas.height); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo((canvas.width / 3) * i, 0);
+      ctx.lineTo((canvas.width / 3) * i, canvas.height);
+      ctx.stroke();
     }
     for (let i = 1; i < 3; i++) {
-      ctx.beginPath(); ctx.moveTo(0, (canvas.height / 3) * i); ctx.lineTo(canvas.width, (canvas.height / 3) * i); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, (canvas.height / 3) * i);
+      ctx.lineTo(canvas.width, (canvas.height / 3) * i);
+      ctx.stroke();
     }
     ctx.setLineDash([]);
 
@@ -163,13 +130,16 @@ export default function CameraView() {
       const y = ((det.cy - det.h / 2) * aiScaleY * scale) + offsetY;
       const drawW = (det.w * aiScaleX) * scale;
       const drawH = (det.h * aiScaleY) * scale;
+
       const isUrgent = det.distance === "Very Near" || det.distance === "Near";
       ctx.strokeStyle = isUrgent ? "#FFB4AB" : "#AAC7FF";
       ctx.lineWidth = 2;
       ctx.setLineDash(isUrgent ? [] : [5, 5]);
       ctx.strokeRect(x, y, drawW, drawH);
-      const labelText = `${(det.displayLabel || det.label).toUpperCase()} ${(det.score || 0).toFixed(2)}`;
-      ctx.font = "bold 10px monospace";
+
+      // Label background
+      const labelText = `${det.label.toUpperCase()} ${(det.score || 0).toFixed(2)}`;
+      ctx.font = "bold 10px Inter";
       const textWidth = ctx.measureText(labelText).width;
       const labelY = y > 20 ? y - 22 : y + 2;
       ctx.fillStyle = isUrgent ? "#FFB4AB" : "#AAC7FF";
@@ -179,468 +149,217 @@ export default function CameraView() {
     });
   }, [activeDetections, isSystemActive]);
 
-  // 4. Audio feedback + detection log
+  // 4. Audio Feedback
   useEffect(() => {
-    if (isMuted || !isSystemActive) return;
-    if (currentMode !== "PATHFINDER" && activeDetections.length === 0) return;
-    const message = announce(activeDetections, currentMode, isPathSafe);
-    if (!message) return;
-    addVoiceLogEntry(message, 'detection');
-  }, [activeDetections, announce, isMuted, currentMode, isPathSafe, isSystemActive]);
+    if (currentMode === "PATHFINDER") return;
+
+    if (isMuted || activeDetections.length === 0 || !isSystemActive) return;
+    const currentTime = Date.now();
+    const modeConfig = MODES[currentMode] || MODES.NORMAL;
+    const cooldown = modeConfig.cooldown || 3000;
+
+    if (currentTime - lastSpokenRef.current > cooldown) {
+      const topObject = activeDetections[0];
+      let message = topObject.displayText;
+      if (modeConfig.prefix) message = `${modeConfig.prefix} ${message}`;
+      if (!isPathSafe && currentMode !== "SILENT") message = `Stop! ${message}`;
+
+      speak(message);
+      lastSpokenRef.current = currentTime;
+
+      const newEntry = {
+        id: Date.now(),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),
+        text: message,
+        mode: currentMode
+      };
+      setEventLog(prev => [newEntry, ...prev].slice(0, 20));
+    }
+  }, [activeDetections, isMuted, currentMode, isPathSafe, isSystemActive]);
 
   const handleManualModeSelection = (m) => {
-    stopListening();
     setCurrentMode(m);
-    setIsMuted(m === "SILENT");
     onModeActivated();
-    speak(`${MODES[m].label} activated.`, true);
-    addVoiceLogEntry(`Mode changed to ${MODES[m].label}`, 'system');
+    speak(`${MODES[m].label} mode activated.`);
+  };
+
+  // Determine log entry icon & color for each entry
+  const getLogEntryStyle = (text) => {
+    const lower = text.toLowerCase();
+    if (lower.includes('stop') || lower.includes('obstacle'))
+      return { icon: 'warning', color: 'var(--error)', borderClass: 'camera-log-entry-danger' };
+    if (lower.includes('person') || lower.includes('pedestrian'))
+      return { icon: 'person', color: 'var(--primary)', borderClass: 'camera-log-entry-info' };
+    return { icon: 'visibility', color: 'var(--tertiary)', borderClass: 'camera-log-entry-neutral' };
   };
 
   const handleMuteToggle = () => {
     if (isMuted) {
+      // Unmute
       setIsMuted(false);
-      speak("Narration resumed.", true);
-      addVoiceLogEntry("Narration resumed", 'system');
+      speak("Narration resumed.");
     } else {
+      // Mute — cancel any ongoing speech immediately
       window.speechSynthesis.cancel();
       setIsMuted(true);
-      addVoiceLogEntry("Narration muted", 'system');
     }
   };
 
-  const getLogEntryStyle = (entry) => {
-    if (entry.type === 'voice') return { icon: 'mic', color: '#A78BFA', dot: '#7C3AED' };
-    if (entry.type === 'system') return { icon: 'settings', color: '#60A5FA', dot: '#2563EB' };
-    const lower = entry.text.toLowerCase();
-    if (lower.includes('stop') || lower.includes('obstacle') || lower.includes('danger'))
-      return { icon: 'warning', color: '#F87171', dot: '#DC2626' };
-    if (lower.includes('person') || lower.includes('pedestrian'))
-      return { icon: 'person', color: '#AAC7FF', dot: '#3E90FF' };
-    return { icon: 'visibility', color: '#6EE7B7', dot: '#059669' };
-  };
-
   const modeLabel = MODES[currentMode]?.label || currentMode;
-  const startupHint = isVoiceSupported
-    ? (isListening ? 'Say a mode name. You can also say mute, unmute, restart, or help.' : 'Tap the microphone to start voice mode selection.')
-    : 'Voice commands unavailable. Use mode buttons below.';
 
   return (
-    <div style={layoutStyles.root}>
+    <div className="camera-page">
       <Navbar onNavigate={handleSafeNavigate} />
 
-      {/* ── STATUS BAR ── */}
-      <div style={{
-        ...layoutStyles.statusBar,
-        background: isSystemActive ? 'rgba(0,30,10,0.85)' : 'rgba(20,20,40,0.85)',
-        borderBottom: isSystemActive ? '1px solid rgba(74,222,128,0.3)' : '1px solid rgba(170,199,255,0.15)',
-      }}>
-        <span style={{
-          width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-          background: isSystemActive ? '#4ADE80' : '#60A5FA',
-          boxShadow: isSystemActive ? '0 0 8px #4ADE80' : '0 0 8px #60A5FA',
-          animation: 'pulse 2s infinite',
-        }} />
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: isSystemActive ? '#4ADE80' : '#AAC7FF' }}>
-          {systemStatus}
-        </span>
+      {/* Status bar */}
+      <div className={`camera-status-bar ${isSystemActive ? 'camera-status-bar-active' : 'camera-status-bar-waiting'}`}>
+        <span className={`status-dot ${isSystemActive ? 'status-dot-active' : 'status-dot-waiting'}`} />
+        {systemStatus}
 
-        {!isSystemActive && isVoiceSupported && (
-          <span style={{
-            fontSize: 10, padding: '2px 8px', borderRadius: 99, fontWeight: 700,
-            background: isListening ? 'rgba(167,139,250,0.2)' : 'rgba(255,255,255,0.07)',
-            color: isListening ? '#A78BFA' : '#888', border: isListening ? '1px solid #7C3AED' : '1px solid #333',
-          }}>
-            {isListening ? '● MIC LIVE' : 'MIC READY'}
-          </span>
-        )}
-
-        {currentMode === "PATHFINDER" && isSystemActive && (
-          <span style={{
-            fontSize: 10, padding: '2px 8px', borderRadius: 99, fontWeight: 700,
-            background: isPathSafe ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.2)',
-            color: isPathSafe ? '#4ADE80' : '#F87171',
-            border: isPathSafe ? '1px solid #166534' : '1px solid #991B1B',
-          }}>
-            {isPathSafe ? 'PATH CLEAR' : '⚠ OBSTACLE'}
-          </span>
-        )}
-
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-          <button onClick={handleMuteToggle} style={{
-            ...layoutStyles.statusBtn,
-            background: isMuted ? 'rgba(248,113,113,0.15)' : 'rgba(255,255,255,0.07)',
-            color: isMuted ? '#F87171' : '#AAC7FF',
-            border: isMuted ? '1px solid #991B1B' : '1px solid #333',
-          }}>
-            <Icon name={isMuted ? 'volume_off' : 'volume_up'} fill size={13} />
-            {isMuted ? 'UNMUTE' : 'MUTE'}
-          </button>
-        </div>
+        <button
+          onClick={handleMuteToggle}
+          className={`mute-toggle-btn ${isMuted ? 'mute-toggle-btn-muted' : ''}`}
+        >
+          <Icon name={isMuted ? 'volume_off' : 'volume_up'} fill size={16} />
+          {isMuted ? 'Unmute' : 'Mute'}
+        </button>
       </div>
 
-      {/* ── MAIN CONTENT AREA ── fills remaining height */}
-      <div style={layoutStyles.mainArea}>
-
-        {/* LEFT / CAMERA COLUMN */}
-        <div style={layoutStyles.cameraColumn}>
+      {/* Main content */}
+      <div className="camera-main" style={{ marginTop: 0 }}>
+        {/* Camera feed */}
+        <div className="camera-video-section">
+          <div className="grid-overlay" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1 }} />
           <div
-            style={layoutStyles.videoWrapper}
+            className="camera-video-wrapper"
             onDoubleClick={() => {
               setCurrentMode("SILENT");
               setIsMuted(true);
               handleScreenInteraction();
             }}
           >
-            <video ref={videoRef} autoPlay playsInline muted style={layoutStyles.video} />
-            <canvas ref={canvasRef} style={layoutStyles.canvas} />
+            <video ref={videoRef} autoPlay playsInline muted className="camera-video" />
+            <canvas ref={canvasRef} className="camera-canvas" />
 
-            {/* Startup overlay */}
-            {!isSystemActive && (
-              <div style={layoutStyles.overlay}>
-                <div style={layoutStyles.startupCard}>
-                  <div style={{
-                    width: 52, height: 52, borderRadius: '50%',
-                    background: isListening ? 'rgba(167,139,250,0.2)' : 'rgba(170,199,255,0.1)',
-                    border: isListening ? '2px solid #7C3AED' : '2px solid rgba(170,199,255,0.3)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    animation: isListening ? 'breathe 1.5s ease-in-out infinite' : 'none',
-                  }}>
-                    <Icon name={isListening ? 'mic' : 'assistant'} size={24} fill={isListening} style={{ color: isListening ? '#A78BFA' : '#AAC7FF' }} />
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <h2 style={{ margin: '0 0 6px', fontSize: 18, fontWeight: 800, letterSpacing: '-0.02em' }}>Welcome to Drishti</h2>
-                    <p style={{ margin: 0, fontSize: 13, color: '#888', lineHeight: 1.5 }}>{startupHint}</p>
-                    {voiceError && <p style={{ margin: '8px 0 0', fontSize: 12, color: '#F87171' }}>{voiceError}</p>}
-                    {lastHeard && <p style={{ margin: '6px 0 0', fontSize: 12, color: '#A78BFA', fontStyle: 'italic' }}>Heard: "{lastHeard}"</p>}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-                    <button onClick={() => restartVoiceSelection({ withPrompt: true })} style={layoutStyles.startupPrimary}>
-                      <Icon name="mic" size={16} />
-                      {isListening ? 'Listening...' : 'Voice Select'}
-                    </button>
-                    <button onClick={() => handleManualModeSelection('NORMAL')} style={layoutStyles.startupSecondary}>
-                      <Icon name="play_arrow" size={16} />
-                      Normal Mode
-                    </button>
-                  </div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
-                    {Object.keys(MODES).filter(k => k !== 'SILENT').slice(0, 5).map(k => (
-                      <span key={k} style={layoutStyles.modeChip}>{MODES[k].label.replace(/\bMode\b/g, '').trim()}</span>
-                    ))}
-                  </div>
-                </div>
+            {currentMode === "CONVERSATION" && (
+              <div style={{
+                position: 'absolute', bottom: 80, left: '50%', transform: 'translateX(-50%)',
+                padding: '8px 20px', borderRadius: 'var(--radius-full)',
+                background: 'rgba(170,199,255,0.1)', border: '1px solid var(--primary)',
+                fontSize: 12, color: 'var(--primary)', fontWeight: 700, zIndex: 10
+              }}>
+                AI ASSISTANT LISTENING...
               </div>
             )}
 
-            {/* Pathfinder badge */}
-            {isSystemActive && currentMode === "PATHFINDER" && (
-              <div style={{
-                position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)',
-                padding: '8px 18px', borderRadius: 99, fontWeight: 800, fontSize: 13,
-                display: 'flex', alignItems: 'center', gap: 8, zIndex: 10,
-                background: isPathSafe ? 'rgba(74,222,128,0.9)' : 'rgba(248,113,113,0.9)',
-                color: isPathSafe ? '#052e16' : '#450a0a',
-                boxShadow: isPathSafe ? '0 0 20px rgba(74,222,128,0.4)' : '0 0 20px rgba(248,113,113,0.4)',
-              }}>
-                <Icon name={isPathSafe ? 'check_circle' : 'warning'} fill size={18} />
+            {!isSystemActive && (
+              <div className="camera-overlay">
+                <div className="camera-pulse" />
+                <p style={{ marginTop: 20, fontWeight: 700, letterSpacing: 1, fontSize: 13, color: 'var(--on-surface)' }}>
+                  LISTENING FOR COMMAND...
+                </p>
+              </div>
+            )}
+
+            {/* Safe path / obstacle badge */}
+            {isSystemActive && (
+              <div
+                className="camera-path-alert"
+                style={{
+                  background: isPathSafe ? 'rgba(74,222,128,0.9)' : 'rgba(255,180,171,0.9)',
+                  borderColor: isPathSafe ? 'rgba(74,222,128,0.5)' : 'rgba(255,180,171,0.5)',
+                  color: isPathSafe ? '#052e16' : '#690005',
+                }}
+              >
+                <Icon name={isPathSafe ? 'check_circle' : 'warning'} fill size={22} />
                 {isPathSafe ? 'SAFE PATH' : 'OBSTACLE DETECTED'}
               </div>
             )}
           </div>
-
-          {/* ── MODE SELECTOR (below camera) ── */}
-          <div style={layoutStyles.modeBar}>
-            <div style={layoutStyles.modeScroll}>
-              {Object.keys(MODES).map(m => (
-                <button key={m} onClick={() => handleManualModeSelection(m)} style={{
-                  ...layoutStyles.modeBtn,
-                  background: currentMode === m ? MODES[m].color || '#3E90FF' : 'rgba(255,255,255,0.06)',
-                  color: currentMode === m ? '#fff' : '#888',
-                  border: currentMode === m ? 'none' : '1px solid rgba(255,255,255,0.1)',
-                  fontWeight: currentMode === m ? 800 : 500,
-                }}>
-                  {MODES[m].label.replace(/\bMode\b/g, '').trim() || m}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* ── STATS FOOTER ── */}
-          <div style={layoutStyles.statsBar}>
-            <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-              <span style={layoutStyles.stat}><span style={layoutStyles.statLabel}>FPS</span> <span style={layoutStyles.statVal}>{fps}</span></span>
-              <span style={layoutStyles.stat}><span style={layoutStyles.statLabel}>MODE</span> <span style={{ ...layoutStyles.statVal, color: '#AAC7FF' }}>{modeLabel}</span></span>
-              <span style={layoutStyles.stat}><span style={layoutStyles.statLabel}>CONF</span> <span style={layoutStyles.statVal}>{confidence}%</span></span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, maxWidth: 160 }}>
-              <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.1)' }}>
-                <div style={{ width: `${confidence}%`, height: '100%', borderRadius: 2, background: '#3E90FF', transition: 'width 0.3s' }} />
-              </div>
-            </div>
-            <button onClick={handleMuteToggle} style={{ ...layoutStyles.iconBtn, color: isMuted ? '#F87171' : '#AAC7FF' }}>
-              <Icon name={isMuted ? 'volume_off' : 'volume_up'} fill size={18} />
-            </button>
-            <button onClick={() => setIsLogExpanded(v => !v)} style={{ ...layoutStyles.iconBtn, color: '#888' }}>
-              <Icon name={isLogExpanded ? 'close' : 'history'} size={18} />
-            </button>
-          </div>
         </div>
 
-        {/* RIGHT / LOG COLUMN — always visible on desktop, slide-up on mobile */}
-        <div style={{
-          ...layoutStyles.logColumn,
-          transform: isLogExpanded ? 'translateY(0)' : undefined,
-        }}>
-          <div style={layoutStyles.logHeader}>
-            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 2, textTransform: 'uppercase', color: '#AAC7FF' }}>Perception Log</span>
-            <button onClick={() => setIsLogExpanded(v => !v)} style={{ ...layoutStyles.iconBtn, color: '#555' }}>
-              <Icon name="close" size={16} />
-            </button>
-          </div>
-
-          {/* Voice input display */}
-          {lastHeard && (
-            <div style={layoutStyles.lastHeardBadge}>
-              <Icon name="mic" size={12} style={{ color: '#A78BFA' }} />
-              <span style={{ fontSize: 11, color: '#A78BFA', fontStyle: 'italic' }}>"{lastHeard}"</span>
+        {/* Right column: log + mode selector */}
+        <div className="camera-log-section">
+          <div className="camera-log-panel">
+            <div className="camera-log-header">
+              <h2>Perception Log</h2>
+              <Icon name="history" size={20} style={{ color: 'var(--primary)', cursor: 'pointer' }} />
             </div>
-          )}
-
-          <div style={layoutStyles.logScroll}>
-            {eventLog.length === 0 && (
-              <div style={{ color: '#444', textAlign: 'center', marginTop: 40, fontSize: 12 }}>
-                {isSystemActive ? "Scanning environment..." : "Waiting for mode selection"}
-              </div>
-            )}
-            {eventLog.map(log => {
-              const style = getLogEntryStyle(log);
-              return (
-                <div key={log.id} style={{
-                  display: 'flex', gap: 10, padding: '10px 0',
-                  borderBottom: '1px solid rgba(255,255,255,0.04)',
-                }}>
-                  <div style={{
-                    width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-                    background: `${style.dot}22`, border: `1px solid ${style.dot}44`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    <Icon name={style.icon} size={14} style={{ color: style.color }} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: log.type === 'voice' ? '#C4B5FD' : '#CCC', wordBreak: 'break-word' }}>
-                      {log.text}
-                    </p>
-                    <p style={{ margin: '2px 0 0', fontSize: 10, color: '#444' }}>{log.time}</p>
-                  </div>
+            <div className="camera-log-body">
+              {eventLog.length === 0 && (
+                <div style={{ color: 'var(--outline)', textAlign: 'center', marginTop: 40, fontSize: 13 }}>
+                  {isSystemActive ? "Scanning environment..." : "Waiting for mode selection"}
                 </div>
-              );
-            })}
+              )}
+              {eventLog.map(log => {
+                const style = getLogEntryStyle(log.text);
+                return (
+                  <div key={log.id} className={`camera-log-entry ${style.borderClass}`}>
+                    <div className="camera-log-entry-icon">
+                      <Icon name={style.icon} size={20} style={{ color: style.color }} />
+                    </div>
+                    <div className="camera-log-entry-text">
+                      <p>{log.text}</p>
+                      <p className="log-time">{log.time}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
+
         </div>
       </div>
 
-      {/* Mobile log overlay toggle */}
-      <button
-        onClick={() => setIsLogExpanded(v => !v)}
-        style={{
-          position: 'fixed', bottom: 80, right: 16, zIndex: 50,
-          width: 44, height: 44, borderRadius: '50%',
-          background: 'rgba(30,30,50,0.9)', border: '1px solid rgba(170,199,255,0.2)',
-          color: '#AAC7FF', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          cursor: 'pointer',
-          // Hide on desktop via media query workaround (inline styles can't do that, so we use a data attr)
-        }}
-        className="log-mobile-fab"
-      >
-        <Icon name={isLogExpanded ? 'close' : 'history'} size={20} />
-      </button>
+      {/* Footer: mode selector + stats */}
+      <footer className="camera-footer-wrapper">
+        {/* Mode selector row */}
+        <div className="camera-mode-row">
+          {Object.keys(MODES).map(m => (
+            <button
+              key={m}
+              onClick={() => handleManualModeSelection(m)}
+              className={`camera-mode-btn ${currentMode === m ? 'camera-mode-btn-active' : ''}`}
+            >
+              {MODES[m].label}
+            </button>
+          ))}
+        </div>
 
-      <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-        @keyframes breathe { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
+        {/* Stats bar */}
+        <div className="camera-footer">
+          <div className="camera-stat-group">
+            <div className="camera-stat">
+              <span className="camera-stat-label">Speed</span>
+              <span className="camera-stat-value">{fps} <small>FPS</small></span>
+            </div>
+            <div className="camera-stat">
+              <span className="camera-stat-label">Mode</span>
+              <span className="camera-mode-badge">{modeLabel}</span>
+            </div>
+          </div>
 
-        /* Hide FAB on desktop */
-        @media (min-width: 768px) { .log-mobile-fab { display: none !important; } }
+          <div className="camera-confidence-bar">
+            <div className="camera-confidence-header">
+              <span className="camera-stat-label">AI Confidence</span>
+              <span style={{ fontSize: 12, fontWeight: 900, color: 'var(--primary)' }}>{confidence}%</span>
+            </div>
+            <div className="camera-confidence-track">
+              <div className="camera-confidence-fill" style={{ width: `${confidence}%` }} />
+            </div>
+          </div>
 
-        /* On mobile: log column is a slide-up sheet */
-        @media (max-width: 767px) {
-          .camera-log-col {
-            position: fixed !important;
-            bottom: 0 !important;
-            left: 0 !important;
-            right: 0 !important;
-            top: auto !important;
-            width: 100% !important;
-            max-height: 55vh !important;
-            border-radius: 20px 20px 0 0 !important;
-            transform: translateY(100%);
-            transition: transform 0.3s ease !important;
-            z-index: 40 !important;
-          }
-          .camera-log-col.expanded {
-            transform: translateY(0) !important;
-          }
-        }
-      `}</style>
+          <div className="camera-footer-actions">
+            <button
+              className={`camera-footer-btn ${isMuted ? 'camera-footer-btn-muted' : 'camera-footer-btn-primary'}`}
+              onClick={handleMuteToggle}
+              title={isMuted ? 'Unmute narration' : 'Mute narration'}
+            >
+              <Icon name={isMuted ? 'volume_off' : 'volume_up'} fill size={22} />
+            </button>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
-
-// ── MODES color map (fallback for mode buttons) ──
-Object.assign(MODES, {
-  NORMAL: { ...MODES.NORMAL, color: '#3E90FF' },
-  HOME: { ...MODES.HOME, color: '#5E5CE6' },
-  OUTDOOR: { ...MODES.OUTDOOR, color: '#32D74B' },
-  SHOPPING: { ...MODES.SHOPPING, color: '#FF9F0A' },
-  SOCIAL: { ...MODES.SOCIAL, color: '#BF5AF2' },
-  PATHFINDER: { ...MODES.PATHFINDER, color: '#0A84FF' },
-  EMERGENCY: { ...MODES.EMERGENCY, color: '#FF3B30' },
-  SILENT: { ...MODES.SILENT, color: '#636366' },
-});
-
-const layoutStyles = {
-  root: {
-    height: '100dvh',
-    display: 'flex',
-    flexDirection: 'column',
-    background: '#0A0A0F',
-    color: '#FFF',
-    overflow: 'hidden',
-    fontFamily: 'monospace, system-ui',
-  },
-  statusBar: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    padding: '6px 14px',
-    flexShrink: 0,
-    backdropFilter: 'blur(10px)',
-    minHeight: 36,
-  },
-  statusBtn: {
-    display: 'flex', alignItems: 'center', gap: 4,
-    padding: '3px 10px', borderRadius: 99,
-    fontSize: 10, fontWeight: 700, letterSpacing: 1,
-    cursor: 'pointer', transition: 'all 0.2s',
-  },
-  mainArea: {
-    flex: 1,
-    display: 'flex',
-    overflow: 'hidden',
-    minHeight: 0, // critical: lets flex children shrink properly
-  },
-  cameraColumn: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    minWidth: 0,
-    overflow: 'hidden',
-  },
-  videoWrapper: {
-    flex: 1,
-    position: 'relative',
-    overflow: 'hidden',
-    minHeight: 0,
-    background: '#000',
-    cursor: 'pointer',
-  },
-  video: {
-    width: '100%', height: '100%', objectFit: 'cover', display: 'block',
-  },
-  canvas: {
-    position: 'absolute', inset: 0,
-    width: '100%', height: '100%', objectFit: 'cover', zIndex: 2,
-    pointerEvents: 'none',
-  },
-  overlay: {
-    position: 'absolute', inset: 0, zIndex: 10,
-    background: 'rgba(0,0,0,0.75)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    backdropFilter: 'blur(4px)',
-  },
-  startupCard: {
-    background: 'rgba(20,20,35,0.95)',
-    border: '1px solid rgba(170,199,255,0.15)',
-    borderRadius: 16, padding: '28px 24px',
-    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16,
-    maxWidth: 340, width: '90%',
-    backdropFilter: 'blur(20px)',
-  },
-  startupPrimary: {
-    display: 'flex', alignItems: 'center', gap: 6,
-    padding: '9px 18px', borderRadius: 99,
-    background: 'rgba(167,139,250,0.15)', border: '1px solid #7C3AED',
-    color: '#C4B5FD', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-  },
-  startupSecondary: {
-    display: 'flex', alignItems: 'center', gap: 6,
-    padding: '9px 18px', borderRadius: 99,
-    background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)',
-    color: '#AAC7FF', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-  },
-  modeChip: {
-    padding: '3px 10px', borderRadius: 99, fontSize: 10, fontWeight: 700,
-    background: 'rgba(255,255,255,0.07)', color: '#666',
-    border: '1px solid rgba(255,255,255,0.1)', textTransform: 'uppercase', letterSpacing: 1,
-  },
-  modeBar: {
-    flexShrink: 0,
-    background: 'rgba(15,15,25,0.95)',
-    borderTop: '1px solid rgba(255,255,255,0.07)',
-    padding: '8px 12px',
-  },
-  modeScroll: {
-    display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 2,
-    scrollbarWidth: 'none',
-  },
-  modeBtn: {
-    padding: '6px 14px', borderRadius: 99,
-    fontSize: 11, letterSpacing: 0.5,
-    whiteSpace: 'nowrap', cursor: 'pointer',
-    transition: 'all 0.2s', flexShrink: 0,
-  },
-  statsBar: {
-    flexShrink: 0,
-    display: 'flex', alignItems: 'center', gap: 12,
-    padding: '6px 14px',
-    background: 'rgba(10,10,20,0.95)',
-    borderTop: '1px solid rgba(255,255,255,0.05)',
-  },
-  stat: { display: 'flex', gap: 5, alignItems: 'baseline' },
-  statLabel: { fontSize: 9, fontWeight: 700, letterSpacing: 1, color: '#444', textTransform: 'uppercase' },
-  statVal: { fontSize: 13, fontWeight: 900, color: '#EEE' },
-  iconBtn: {
-    background: 'none', border: 'none', cursor: 'pointer',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    padding: 6, borderRadius: 8,
-  },
-  logColumn: {
-    width: 280,
-    flexShrink: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    background: 'rgba(12,12,20,0.98)',
-    borderLeft: '1px solid rgba(255,255,255,0.07)',
-    overflow: 'hidden',
-    // On mobile this becomes a fixed sheet via the className + CSS above
-  },
-  logHeader: {
-    flexShrink: 0,
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    padding: '12px 14px 8px',
-    borderBottom: '1px solid rgba(255,255,255,0.07)',
-  },
-  lastHeardBadge: {
-    flexShrink: 0,
-    display: 'flex', alignItems: 'center', gap: 6,
-    margin: '6px 14px',
-    padding: '6px 10px', borderRadius: 8,
-    background: 'rgba(124,58,237,0.12)', border: '1px solid rgba(124,58,237,0.25)',
-  },
-  logScroll: {
-    flex: 1, overflowY: 'auto',
-    padding: '4px 14px',
-    scrollbarWidth: 'thin', scrollbarColor: '#222 transparent',
-  },
-};

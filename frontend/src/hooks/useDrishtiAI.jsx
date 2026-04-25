@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import { MODES, COCO_CLASSES } from '../components/DrishtiConstants';
 import { processDetections } from '../utils/DrishtiLogic';
-import { applyCustomObjectLabels, loadSharedYoloModel } from '../utils/customObjectMatcher';
 
-export default function useDrishtiAI(videoRef, customReferences = []) {
+export default function useDrishtiAI(videoRef, speak, lastSpokenRef) {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [fps, setFps] = useState(0);
   const [activeDetections, setActiveDetections] = useState([]);
@@ -23,7 +22,7 @@ export default function useDrishtiAI(videoRef, customReferences = []) {
         await tf.ready();
         
         // Ensure the model path is correct for your project structure
-        const model = await loadSharedYoloModel();
+        const model = await tf.loadGraphModel('/yolo11n_web_model/model.json');
         modelRef.current = model;
         setIsModelLoaded(true);
         console.log("Drishti Neural Engine: Online (High Sensitivity)");
@@ -133,10 +132,8 @@ export default function useDrishtiAI(videoRef, customReferences = []) {
         }];
       }
 
-      const labeledDetections = applyCustomObjectLabels(filtered, customReferences, video);
-
       // 5. Update State
-      setActiveDetections(labeledDetections);
+      setActiveDetections(filtered);
 
     //   // 4. Smart Filtering
     //   // This ensures we don't ignore critical objects even if they aren't in the mode's 'whitelist'
@@ -151,16 +148,45 @@ export default function useDrishtiAI(videoRef, customReferences = []) {
     //   setActiveDetections(filtered);
     // //   setIsPathSafe(isPathClear);
 
-      if (currentMode === "PATHFINDER") {
-        const criticalObjects = labeledDetections.filter((d) => {
+if (currentMode === "PATHFINDER") {
+        // 1. Identify objects in the "Critical Corridor" (Center 40%)
+        const criticalObjects = filtered.filter(d => {
           const centerX = d.cx / 640;
           return centerX > 0.3 && centerX < 0.7;
         });
 
-        setIsPathSafe(criticalObjects.length === 0);
-      } else {
-        setIsPathSafe(isPathClear);
-      }
+        const isNowSafe = criticalObjects.length === 0;
+
+        // --- ADDED: Only process audio if NOT silent and NOT muted ---
+        const shouldSpeak = !isMuted && currentMode !== "SILENT";
+
+        if (!isNowSafe) {
+          // 2. Generate the spatial description
+          const descriptions = criticalObjects.map(d => {
+            const relX = d.cx / 640;
+            const relY = d.cy / 640;
+            let horizontal = relX < 0.33 ? "at left" : relX > 0.66 ? "at right" : "ahead";
+            let vertical = relY > 0.66 ? "down" : relY < 0.33 ? "up" : "";
+            return `${d.label} ${horizontal} ${vertical}`.trim();
+          });
+
+          const uniqueDesc = [...new Set(descriptions)].slice(0, 2);
+          const alertMsg = `Path not clear because ${uniqueDesc.join(", ")}`;
+
+          // CHECK shouldSpeak HERE
+            if (shouldSpeak && (isPathSafe || (Date.now() - lastSpokenRef.current > 3500))) {
+                speak(alertMsg, true);
+                lastSpokenRef.current = Date.now();
+                }
+            } else {
+                // CHECK shouldSpeak HERE
+                if (shouldSpeak && !isPathSafe) {
+                speak("Path clear ahead", true);
+                lastSpokenRef.current = Date.now();
+                }
+            }
+            setIsPathSafe(isNowSafe);
+            }
 
 
     // // 5. Mode-Specific Safety Logic
@@ -186,8 +212,8 @@ export default function useDrishtiAI(videoRef, customReferences = []) {
     //     setIsPathSafe(isPathClear);
     //   }
       
-      if (labeledDetections.length > 0) {
-        const avgConf = labeledDetections.reduce((acc, curr) => acc + curr.confidence, 0) / labeledDetections.length;
+      if (filtered.length > 0) {
+        const avgConf = filtered.reduce((acc, curr) => acc + curr.confidence, 0) / filtered.length;
         setConfidence(Math.round(avgConf * 100));
       } else {
         setConfidence(0);
