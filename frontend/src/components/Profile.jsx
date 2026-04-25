@@ -63,7 +63,7 @@ export default function Profile() {
 
       <div className="page-content page-content-wide">
         {/* Profile header card */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 24, marginBottom: 24, padding: '28px 32px' }}>
+        <div className="card profile-header-card" style={{ display: 'flex', alignItems: 'center', gap: 24, marginBottom: 24, padding: '28px 32px' }}>
           <div style={{ position: 'relative' }}>
             <div style={{
               width: 72, height: 72, borderRadius: '50%',
@@ -99,7 +99,7 @@ export default function Profile() {
         </div>
 
         {/* Quick action buttons */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 32 }}>
+        <div className="profile-quick-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 32 }}>
           <button
             onClick={() => navigate('/upload')}
             className="btn btn-outline btn-lg"
@@ -166,7 +166,7 @@ export default function Profile() {
               </button>
             </div>
           ) : (
-            <div style={{
+            <div className="profile-objects-grid" style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
               gap: 14
@@ -188,6 +188,9 @@ export default function Profile() {
                     padding: '10px 12px', fontSize: 14, fontWeight: 700, textAlign: 'center'
                   }}>
                     {obj.label}
+                    <div style={{ marginTop: 4, fontSize: 11, fontWeight: 600, color: 'var(--outline)', textTransform: 'uppercase', letterSpacing: 0.8 }}>
+                      Fallback: {obj.baseLabel || 'unknown'}
+                    </div>
                   </div>
                 </div>
               ))}

@@ -48,7 +48,7 @@ export default function Navbar({ onNavigate }) {
 
         {/* Right side */}
         <div className="nav-right">
-          <button className="nav-icon-btn" onClick={() => handleNav('/')}>
+          <button className="nav-icon-btn nav-home-shortcut" onClick={() => handleNav('/')}>
             <Icon name="visibility" size={22} />
           </button>
           {user ? (

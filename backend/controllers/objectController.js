@@ -6,12 +6,13 @@ export const uploadObject = async (req, res) => {
       return res.status(400).json({ message: 'No image uploaded' });
     }
 
-    const { label } = req.body;
+    const { label, baseLabel } = req.body;
     const userId = req.user.userId; 
 
     const newObject = new CustomObject({
       userId,
       label,
+      baseLabel: (baseLabel || 'unknown').trim().toLowerCase(),
       imagePath: req.file.path
     });
 

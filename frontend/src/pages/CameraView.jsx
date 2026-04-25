@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import useDrishtiAI from '../hooks/useDrishtiAI';
+import useDrishtiAudio from '../hooks/useDrishtiAudio';
+import useCustomObjectMatcher from '../hooks/useCustomObjectMatcher';
 import useDrishtiVoice from '../hooks/useDrishtiVoice';
 import { MODES } from '../components/DrishtiConstants';
 import Navbar from '../components/Navbar';
@@ -25,7 +27,6 @@ export default function CameraView() {
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const lastSpokenRef = useRef(0);
   const idleTimerRef = useRef(null);
 
   const [currentMode, setCurrentMode] = useState("NORMAL");
@@ -33,6 +34,7 @@ export default function CameraView() {
   const [eventLog, setEventLog] = useState([]);
   const [systemStatus, setSystemStatus] = useState("Initializing...");
   const [isSystemActive, setIsSystemActive] = useState(false);
+  const [isLogExpanded, setIsLogExpanded] = useState(false);
 
   const onModeActivated = useCallback(() => {
     setIsSystemActive(true);
@@ -40,13 +42,48 @@ export default function CameraView() {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
   }, []);
 
-  const { speak, playStartupSequence, handleScreenInteraction } = useDrishtiVoice(
-    currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated
-  );
+  const handleVoiceMuteToggle = useCallback((nextMuted) => {
+    if (typeof nextMuted === 'boolean') {
+      if (nextMuted) {
+        window.speechSynthesis.cancel();
+        setIsMuted(true);
+      } else {
+        setIsMuted(false);
+      }
+      return;
+    }
 
-  const { isModelLoaded, fps, activeDetections, isPathSafe, confidence, runInference } = useDrishtiAI(
-    videoRef, speak, lastSpokenRef
-  );
+    setIsMuted((value) => {
+      if (!value) {
+        window.speechSynthesis.cancel();
+      }
+      return !value;
+    });
+  }, []);
+
+  const audio = useDrishtiAudio(isMuted);
+  const { speak, playStartupSequence, announce } = audio;
+  const { references: customReferences } = useCustomObjectMatcher();
+
+  const {
+    handleScreenInteraction,
+    launchModeSelection,
+    restartVoiceSelection,
+    stopListening,
+    isListening,
+    isVoiceSupported,
+    voiceError,
+    lastHeard,
+  } = useDrishtiVoice({
+    setCurrentMode,
+    setIsMuted,
+    onModeActivated,
+    speak,
+    playStartupSequence,
+    onToggleMute: handleVoiceMuteToggle,
+  });
+
+  const { isModelLoaded, fps, activeDetections, isPathSafe, confidence, runInference } = useDrishtiAI(videoRef, customReferences);
 
   // 1. Startup Logic
   useEffect(() => {
@@ -59,8 +96,8 @@ export default function CameraView() {
         if (videoRef.current) videoRef.current.srcObject = stream;
 
         if (isModelLoaded && !isSystemActive) {
-          setSystemStatus("Waiting for Mode...");
-          playStartupSequence();
+          setSystemStatus("Ready for voice selection");
+          launchModeSelection();
           resetIdleTimer();
         }
       } catch (err) {
@@ -75,11 +112,26 @@ export default function CameraView() {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = setTimeout(() => {
       if (!isSystemActive) {
-        playStartupSequence();
+        launchModeSelection();
         resetIdleTimer();
       }
     }, 40000);
   };
+
+  useEffect(() => {
+    if (isSystemActive) return;
+    if (voiceError) {
+      setSystemStatus('Voice assistance needs attention');
+      return;
+    }
+    if (isListening) {
+      setSystemStatus('Listening for mode');
+      return;
+    }
+    if (isModelLoaded) {
+      setSystemStatus('Ready for voice selection');
+    }
+  }, [isListening, isModelLoaded, isSystemActive, voiceError]);
 
   // 2. Controlled Inference Loop
   useEffect(() => {
@@ -138,7 +190,7 @@ export default function CameraView() {
       ctx.strokeRect(x, y, drawW, drawH);
 
       // Label background
-      const labelText = `${det.label.toUpperCase()} ${(det.score || 0).toFixed(2)}`;
+      const labelText = `${(det.displayLabel || det.label).toUpperCase()} ${(det.score || 0).toFixed(2)}`;
       ctx.font = "bold 10px Inter";
       const textWidth = ctx.measureText(labelText).width;
       const labelY = y > 20 ? y - 22 : y + 2;
@@ -151,36 +203,26 @@ export default function CameraView() {
 
   // 4. Audio Feedback
   useEffect(() => {
-    if (currentMode === "PATHFINDER") return;
+    if (isMuted || !isSystemActive) return;
+    if (currentMode !== "PATHFINDER" && activeDetections.length === 0) return;
+    const message = announce(activeDetections, currentMode, isPathSafe);
+    if (!message) return;
 
-    if (isMuted || activeDetections.length === 0 || !isSystemActive) return;
-    const currentTime = Date.now();
-    const modeConfig = MODES[currentMode] || MODES.NORMAL;
-    const cooldown = modeConfig.cooldown || 3000;
-
-    if (currentTime - lastSpokenRef.current > cooldown) {
-      const topObject = activeDetections[0];
-      let message = topObject.displayText;
-      if (modeConfig.prefix) message = `${modeConfig.prefix} ${message}`;
-      if (!isPathSafe && currentMode !== "SILENT") message = `Stop! ${message}`;
-
-      speak(message);
-      lastSpokenRef.current = currentTime;
-
-      const newEntry = {
-        id: Date.now(),
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),
-        text: message,
-        mode: currentMode
-      };
-      setEventLog(prev => [newEntry, ...prev].slice(0, 20));
-    }
-  }, [activeDetections, isMuted, currentMode, isPathSafe, isSystemActive]);
+    const newEntry = {
+      id: Date.now(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),
+      text: message,
+      mode: currentMode
+    };
+    setEventLog(prev => [newEntry, ...prev].slice(0, 20));
+  }, [activeDetections, announce, isMuted, currentMode, isPathSafe, isSystemActive]);
 
   const handleManualModeSelection = (m) => {
+    stopListening();
     setCurrentMode(m);
+    setIsMuted(m === "SILENT");
     onModeActivated();
-    speak(`${MODES[m].label} mode activated.`);
+    speak(`${MODES[m].label} activated.`, true);
   };
 
   // Determine log entry icon & color for each entry
@@ -195,17 +237,18 @@ export default function CameraView() {
 
   const handleMuteToggle = () => {
     if (isMuted) {
-      // Unmute
       setIsMuted(false);
-      speak("Narration resumed.");
+      speak("Narration resumed.", true);
     } else {
-      // Mute — cancel any ongoing speech immediately
       window.speechSynthesis.cancel();
       setIsMuted(true);
     }
   };
 
   const modeLabel = MODES[currentMode]?.label || currentMode;
+  const startupHint = isVoiceSupported
+    ? (isListening ? 'Say a mode name. You can also say mute, unmute, restart, or help.' : 'Tap the microphone to start voice mode selection.')
+    : 'Voice commands are unavailable in this browser. Use the mode buttons below.';
 
   return (
     <div className="camera-page">
@@ -215,6 +258,18 @@ export default function CameraView() {
       <div className={`camera-status-bar ${isSystemActive ? 'camera-status-bar-active' : 'camera-status-bar-waiting'}`}>
         <span className={`status-dot ${isSystemActive ? 'status-dot-active' : 'status-dot-waiting'}`} />
         {systemStatus}
+
+        {!isSystemActive && isVoiceSupported && (
+          <span className={`camera-inline-indicator ${isListening ? 'camera-inline-indicator-listening' : 'camera-inline-indicator-idle'}`}>
+            {isListening ? 'Mic Live' : 'Mic Ready'}
+          </span>
+        )}
+
+        {currentMode === "PATHFINDER" && isSystemActive && (
+          <span className={`camera-inline-indicator ${isPathSafe ? 'camera-inline-indicator-safe' : 'camera-inline-indicator-alert'}`}>
+            {isPathSafe ? 'Path Clear' : 'Obstacle Ahead'}
+          </span>
+        )}
 
         <button
           onClick={handleMuteToggle}
@@ -254,15 +309,54 @@ export default function CameraView() {
 
             {!isSystemActive && (
               <div className="camera-overlay">
-                <div className="camera-pulse" />
-                <p style={{ marginTop: 20, fontWeight: 700, letterSpacing: 1, fontSize: 13, color: 'var(--on-surface)' }}>
-                  LISTENING FOR COMMAND...
-                </p>
+                <div className="camera-startup-card">
+                  <div className="camera-startup-icon">
+                    <Icon name={isListening ? 'mic' : 'assistant'} size={26} fill={isListening} />
+                  </div>
+                  <div className="camera-startup-copy">
+                    <h2>Welcome to Drishti</h2>
+                    <p>{startupHint}</p>
+                    {voiceError && <p className="camera-startup-error">{voiceError}</p>}
+                    {lastHeard && (
+                      <p className="camera-startup-heard">
+                        Heard: "{lastHeard}"
+                      </p>
+                    )}
+                  </div>
+                  <div className="camera-startup-actions">
+                    <button
+                      type="button"
+                      className="camera-startup-btn camera-startup-btn-primary"
+                      onClick={() => restartVoiceSelection({ withPrompt: true })}
+                    >
+                      <Icon name="mic" size={18} />
+                      {isListening ? 'Listening...' : 'Start Voice Selection'}
+                    </button>
+                    <button
+                      type="button"
+                      className="camera-startup-btn camera-startup-btn-secondary"
+                      onClick={() => handleManualModeSelection('NORMAL')}
+                    >
+                      <Icon name="play_arrow" size={18} />
+                      Start Normal Mode
+                    </button>
+                  </div>
+                  <div className="camera-startup-tips">
+                    {Object.keys(MODES)
+                      .filter((modeKey) => modeKey !== 'SILENT')
+                      .slice(0, 5)
+                      .map((modeKey) => (
+                        <span key={modeKey} className="camera-tip-chip">
+                          {MODES[modeKey].label.replace(/\bMode\b/g, '').trim()}
+                        </span>
+                      ))}
+                  </div>
+                </div>
               </div>
             )}
 
             {/* Safe path / obstacle badge */}
-            {isSystemActive && (
+            {isSystemActive && currentMode === "PATHFINDER" && (
               <div
                 className="camera-path-alert"
                 style={{
@@ -280,10 +374,18 @@ export default function CameraView() {
 
         {/* Right column: log + mode selector */}
         <div className="camera-log-section">
-          <div className="camera-log-panel">
+          <div className={`camera-log-panel ${isLogExpanded ? 'camera-log-panel-expanded' : ''}`}>
             <div className="camera-log-header">
               <h2>Perception Log</h2>
-              <Icon name="history" size={20} style={{ color: 'var(--primary)', cursor: 'pointer' }} />
+              <button
+                type="button"
+                className="camera-log-toggle"
+                onClick={() => setIsLogExpanded((value) => !value)}
+                aria-expanded={isLogExpanded}
+                aria-label={isLogExpanded ? 'Collapse perception log' : 'Expand perception log'}
+              >
+                <Icon name={isLogExpanded ? 'keyboard_arrow_down' : 'history'} size={20} style={{ color: 'var(--primary)' }} />
+              </button>
             </div>
             <div className="camera-log-body">
               {eventLog.length === 0 && (
@@ -350,6 +452,13 @@ export default function CameraView() {
           </div>
 
           <div className="camera-footer-actions">
+            <button
+              className="camera-footer-btn camera-footer-btn-secondary camera-log-mobile-btn"
+              onClick={() => setIsLogExpanded((value) => !value)}
+              title={isLogExpanded ? 'Hide perception log' : 'Show perception log'}
+            >
+              <Icon name={isLogExpanded ? 'close' : 'history'} size={20} />
+            </button>
             <button
               className={`camera-footer-btn ${isMuted ? 'camera-footer-btn-muted' : 'camera-footer-btn-primary'}`}
               onClick={handleMuteToggle}

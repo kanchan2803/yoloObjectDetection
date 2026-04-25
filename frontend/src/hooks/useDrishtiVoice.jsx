@@ -1,347 +1,298 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MODES } from '../components/DrishtiConstants';
 
-export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated) {
+const MODE_ALIASES = {
+  NORMAL: ['normal', 'regular', 'default'],
+  HOME: ['home', 'indoor', 'house'],
+  OUTDOOR: ['outdoor', 'outside', 'street', 'travel'],
+  SHOPPING: ['shopping', 'shop', 'store', 'market'],
+  SOCIAL: ['social', 'people', 'friends'],
+  PATHFINDER: ['pathfinder', 'path', 'navigation', 'navigate'],
+  EMERGENCY: ['emergency', 'danger', 'alert', 'help'],
+  SILENT: ['silent', 'mute', 'stop', 'pause'],
+};
+
+function getSpeechRecognitionConstructor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function normalizeTranscript(transcript = '') {
+  return transcript
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export default function useDrishtiVoice({
+  setCurrentMode,
+  setIsMuted,
+  onModeActivated,
+  speak,
+  playStartupSequence,
+  onRestartSelection,
+  onToggleMute,
+}) {
   const recognitionRef = useRef(null);
-  const synth = window.speechSynthesis;
+  const shouldResumeListeningRef = useRef(false);
+  const retryTimeoutRef = useRef(null);
+
   const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
+  const [lastHeard, setLastHeard] = useState('');
 
-  // 1. Core Speech Function with Callback
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const speechQueue = useRef([]);
+  const isVoiceSupported = useMemo(() => Boolean(getSpeechRecognitionConstructor()), []);
 
-  // // 1. Core Speech Function with Queuing Logic
-  // const speak = (text, interrupt = false, onEndCallback = null) => {
-  //   if (interrupt) {
-  //     synth.cancel();
-  //     speechQueue.current = []; // Clear queue on priority interrupt
-  //     setIsSpeaking(false);
-  //   }
-
-  //   // Add message to queue
-  //   speechQueue.current.push({ text, onEndCallback });
-
-  //   const processQueue = () => {
-  //     if (speechQueue.current.length === 0 || synth.speaking) return;
-
-  //     const nextItem = speechQueue.current.shift();
-  //     const utterance = new SpeechSynthesisUtterance(nextItem.text);
-  //     utterance.rate = 1.1;
-  //     utterance.pitch = 1.0;
-
-  //     utterance.onstart = () => setIsSpeaking(true);
-      
-  //     utterance.onend = () => {
-  //       setIsSpeaking(false);
-  //       if (nextItem.onEndCallback) nextItem.onEndCallback();
-  //       setTimeout(processQueue, 150);
-  //     };
-
-  //     utterance.onerror = () => setIsSpeaking(false);
-  //     synth.speak(utterance);
-  //   };
-
-  //   processQueue();
-  // };
-
-  const speak = (text, interrupt = true, onEndCallback = null) => {
-    if (interrupt) synth.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.1;
-    utterance.pitch = 1.0;
-    
-    if (onEndCallback) {
-      utterance.onend = onEndCallback;
+  const clearRetryTimeout = () => {
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
     }
-    
-    synth.speak(utterance);
-    return utterance;
-  };
-
-  // 2. Modified Startup Sequence
-  const playStartupSequence = async () => {
-    const speakReady = (msg) => new Promise(resolve => speak(msg, true, resolve));
-    const speakNext = (msg) => new Promise(resolve => speak(msg, false, resolve));
-
-    await speakReady("Hi, this is Drishti. Camera and microphone active.");
-    await speakNext("Choose a mode. Available options are:");
-    
-    for (const modeKey of Object.keys(MODES)) {
-      if (modeKey === "SILENT") continue;
-      await speakNext(MODES[modeKey].label);
-    }
-    
-    speak("Speak the name of a mode now.", false, () => {
-        startListening();
-    });
-  };
-
-  // 3. Voice Command Handler
-  const handleVoiceCommand = (transcript) => {
-    const command = transcript.toLowerCase();
-    for (const [key, mode] of Object.entries(MODES)) {
-      if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
-        activateMode(key);
-        return;
-      }
-    }
-  };
-
-  // Helper to unify activation logic
-  const activateMode = (key) => {
-    setCurrentMode(key);
-    const label = MODES[key]?.label || key;
-    speak(`${label} activated. System starting.`);
-    setIsMuted(key === "SILENT");
-    stopListening();
-    if (onModeActivated) onModeActivated();
-  };
-
-  // 4. Recognition Lifecycle
-  const startListening = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition || isListening) return;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.lang = 'en-US';
-    recognition.onstart = () => setIsListening(true);
-    recognition.onresult = (event) => {
-      const transcript = event.results[event.results.length - 1][0].transcript;
-      handleVoiceCommand(transcript);
-    };
-    recognition.onend = () => setIsListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
   };
 
   const stopListening = () => {
-    if (recognitionRef.current) recognitionRef.current.stop();
+    shouldResumeListeningRef.current = false;
+    clearRetryTimeout();
+
+    if (recognitionRef.current) {
+      recognitionRef.current.onend = null;
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
+
+    setIsListening(false);
   };
 
-  // 5. NEW: Keyboard Listener for 'S' key
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key.toLowerCase() === 's') {
-        // Force system into Silent mode state
-        setCurrentMode("SILENT");
-        setIsMuted(true);
-        synth.cancel();
-        speak("Silent mode activated. Listening for new mode.", true, () => {
-          startListening();
-        });
+  const activateMode = (modeKey) => {
+    const nextMode = MODES[modeKey] ? modeKey : 'NORMAL';
+    const label = MODES[nextMode]?.label || nextMode;
+
+    shouldResumeListeningRef.current = false;
+    clearRetryTimeout();
+    setVoiceError('');
+    setCurrentMode(nextMode);
+    setIsMuted(nextMode === 'SILENT');
+    stopListening();
+    speak(`${label} activated.`, true);
+
+    if (onModeActivated) {
+      onModeActivated(nextMode);
+    }
+  };
+
+  const resolveModeFromTranscript = (transcript) => {
+    const normalized = normalizeTranscript(transcript);
+    if (!normalized) return null;
+
+    for (const [modeKey, aliases] of Object.entries(MODE_ALIASES)) {
+      if (aliases.some((alias) => normalized.includes(alias))) {
+        return modeKey;
       }
+    }
+
+    for (const [modeKey, mode] of Object.entries(MODES)) {
+      const modeName = normalizeTranscript(mode.label);
+      if (modeName && normalized.includes(modeName)) {
+        return modeKey;
+      }
+    }
+
+    return null;
+  };
+
+  const handleVoiceCommand = (transcript) => {
+    const normalized = normalizeTranscript(transcript);
+    if (!normalized) return;
+
+    setLastHeard(transcript.trim());
+
+    if (normalized.includes('help') || normalized.includes('what can i say')) {
+      speak('You can say normal, home, outdoor, shopping, social, pathfinder, emergency, silent, mute, unmute, or restart.', true);
+      return;
+    }
+
+    if (normalized.includes('restart') || normalized.includes('start again')) {
+      if (onRestartSelection) {
+        onRestartSelection();
+      } else {
+        restartVoiceSelection({ withPrompt: true });
+      }
+      return;
+    }
+
+    if (normalized.includes('unmute') || normalized.includes('resume voice')) {
+      if (onToggleMute) {
+        onToggleMute(false, true);
+      }
+      speak('Narration resumed.', true);
+      return;
+    }
+
+    if (
+      normalized.includes('mute') ||
+      normalized.includes('quiet') ||
+      normalized.includes('stop speaking')
+    ) {
+      if (onToggleMute) {
+        onToggleMute(true, true);
+      }
+      speak('Narration muted. Say unmute to hear updates again.', true);
+      return;
+    }
+
+    const modeKey = resolveModeFromTranscript(normalized);
+    if (modeKey) {
+      activateMode(modeKey);
+      return;
+    }
+
+    speak('Mode not recognized. Say normal, home, outdoor, shopping, social, pathfinder, emergency, or silent.', true);
+  };
+
+  const scheduleRestart = () => {
+    clearRetryTimeout();
+    retryTimeoutRef.current = setTimeout(() => {
+      if (shouldResumeListeningRef.current) {
+        startListening({ announceRetry: false });
+      }
+    }, 800);
+  };
+
+  const startListening = ({ announceRetry = true } = {}) => {
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+
+    if (!SpeechRecognition) {
+      setVoiceError('Voice commands are not supported in this browser. Use the mode buttons below.');
+      return false;
+    }
+
+    if (recognitionRef.current || isListening) {
+      return true;
+    }
+
+    clearRetryTimeout();
+    shouldResumeListeningRef.current = true;
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 3;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setVoiceError('');
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event) => {
+        const latestResult = event.results[event.results.length - 1];
+        const transcript = latestResult?.[0]?.transcript || '';
+        if (latestResult?.isFinal) {
+          handleVoiceCommand(transcript);
+        } else {
+          setLastHeard(transcript.trim());
+        }
+      };
+
+      recognition.onerror = (event) => {
+        setIsListening(false);
+
+        if (event.error === 'no-speech') {
+          setVoiceError('Listening again. Say a mode name when you are ready.');
+          if (announceRetry) {
+            speak('I did not hear anything. Please say a mode name.', true);
+          }
+          scheduleRestart();
+          return;
+        }
+
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          shouldResumeListeningRef.current = false;
+          setVoiceError('Microphone access is blocked. Allow mic access or choose a mode manually.');
+          return;
+        }
+
+        setVoiceError('Voice control paused. Tap the microphone button to try again.');
+        scheduleRestart();
+      };
+
+      recognition.onend = () => {
+        recognitionRef.current = null;
+        setIsListening(false);
+        if (shouldResumeListeningRef.current) {
+          scheduleRestart();
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+      return true;
+    } catch (error) {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setVoiceError('Voice control could not start. Tap the microphone button to try again.');
+      return false;
+    }
+  };
+
+  const restartVoiceSelection = ({ withPrompt = true } = {}) => {
+    stopListening();
+    setCurrentMode('SILENT');
+    setIsMuted(true);
+    setLastHeard('');
+
+    if (withPrompt) {
+      speak('Listening for mode selection.', true, () => {
+        startListening({ announceRetry: false });
+      });
+    } else {
+      startListening({ announceRetry: false });
+    }
+  };
+
+  const launchModeSelection = () => {
+    setCurrentMode('SILENT');
+    setIsMuted(true);
+    setLastHeard('');
+
+    playStartupSequence(
+      Object.values(MODES)
+        .filter((mode) => mode.id !== 'SILENT')
+        .map((mode) => mode.label.replace(/\bMode\b/g, '').trim()),
+      () => {
+        startListening({ announceRetry: false });
+      }
+    );
+  };
+
+  const handleScreenInteraction = () => {
+    restartVoiceSelection({ withPrompt: true });
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key.toLowerCase() !== 's') return;
+      handleScreenInteraction();
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onModeActivated]); // Dependencies ensure fresh callback access
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      stopListening();
+      clearRetryTimeout();
+    };
+  }, []);
 
-  // 6. UPDATED: Interaction logic (Now triggers state change)
-  const handleScreenInteraction = () => {
-    // Stop everything and prepare for new command
-    setCurrentMode("SILENT");
-    setIsMuted(true);
-    speak("System paused. Listening for command.", true, () => {
-      startListening();
-    });
+  return {
+    isListening,
+    isVoiceSupported,
+    voiceError,
+    lastHeard,
+    startListening,
+    stopListening,
+    launchModeSelection,
+    restartVoiceSelection,
+    handleScreenInteraction,
   };
-
-  return { speak, playStartupSequence, handleScreenInteraction, isListening, stopListening };
 }
-
-// import { useEffect, useRef, useState } from 'react';
-// import { MODES } from '../components/DrishtiConstants';
-
-// export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted, onModeActivated) {
-//   const recognitionRef = useRef(null);
-//   const synth = window.speechSynthesis;
-//   const [isListening, setIsListening] = useState(false);
-
-//   // 1. Core Speech Function with Callback
-//   const speak = (text, interrupt = true, onEndCallback = null) => {
-//     if (interrupt) synth.cancel();
-//     const utterance = new SpeechSynthesisUtterance(text);
-//     utterance.rate = 1.1;
-//     utterance.pitch = 1.0;
-    
-//     if (onEndCallback) {
-//       utterance.onend = onEndCallback;
-//     }
-    
-//     synth.speak(utterance);
-//     return utterance;
-//   };
-
-//   // 2. Modified Startup Sequence
-//   const playStartupSequence = async () => {
-//     // We use promises to ensure one sentence finishes before the next starts
-//     const speakReady = (msg) => new Promise(resolve => speak(msg, true, resolve));
-//     const speakNext = (msg) => new Promise(resolve => speak(msg, false, resolve));
-
-//     await speakReady("Hi, this is Drishti. Camera and microphone active.");
-//     await speakNext("Choose a mode. Available options are:");
-    
-//     for (const modeKey of Object.keys(MODES)) {
-//       if (modeKey === "SILENT") continue;
-//       await speakNext(MODES[modeKey].label);
-//     }
-    
-//     speak("Speak the name of a mode now.", false, () => {
-//         startListening();
-//     });
-//   };
-
-//   const handleVoiceCommand = (transcript) => {
-//     const command = transcript.toLowerCase();
-//     for (const [key, mode] of Object.entries(MODES)) {
-//       if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
-//         setCurrentMode(key);
-//         speak(`${mode.label} activated. System starting.`);
-//         setIsMuted(key === "SILENT");
-//         stopListening();
-//         if (onModeActivated) onModeActivated(); // Notify CameraView to start inference
-//         return;
-//       }
-//     }
-//   };
-
-//   const startListening = () => {
-//     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-//     if (!SpeechRecognition || isListening) return;
-//     const recognition = new SpeechRecognition();
-//     recognition.continuous = true;
-//     recognition.lang = 'en-US';
-//     recognition.onstart = () => setIsListening(true);
-//     recognition.onresult = (event) => {
-//       const transcript = event.results[event.results.length - 1][0].transcript;
-//       handleVoiceCommand(transcript);
-//     };
-//     recognition.onend = () => setIsListening(false);
-//     recognitionRef.current = recognition;
-//     recognition.start();
-//   };
-
-//   const stopListening = () => {
-//     if (recognitionRef.current) recognitionRef.current.stop();
-//   };
-
-//   const handleScreenInteraction = () => {
-//     speak("System paused. Listening for command.", true, startListening);
-//   };
-
-//   return { speak, playStartupSequence, handleScreenInteraction, isListening, stopListening };
-// }
-
-// import { useEffect, useRef, useState } from 'react';
-// import { MODES } from '../components/DrishtiConstants';
-
-// export default function useDrishtiVoice(currentMode, setCurrentMode, isMuted, setIsMuted) {
-//   const recognitionRef = useRef(null);
-//   const synth = window.speechSynthesis;
-//   const [isListening, setIsListening] = useState(false);
-
-//   // 1. Core Speech Function
-//   const speak = (text, interrupt = true) => {
-//     if (interrupt) synth.cancel();
-//     const utterance = new SpeechSynthesisUtterance(text);
-//     utterance.rate = 1.1;
-//     utterance.pitch = 1.0;
-//     synth.speak(utterance);
-//     return utterance;
-//   };
-
-//   // 2. The Startup Sequence (Greeting + Mode List)
-//   const playStartupSequence = async () => {
-//     speak("Hi, this is Drishti. Camera and microphone active.");
-    
-//     // Small delay to let the user settle
-//     await new Promise(r => setTimeout(r, 2500));
-    
-//     speak("Choose a mode. Available options are:");
-    
-//     // Announce each mode clearly
-//     for (const modeKey of Object.keys(MODES)) {
-//       if (modeKey === "SILENT") continue;
-//       speak(MODES[modeKey].label, false);
-//       await new Promise(r => setTimeout(r, 1200));
-//     }
-    
-//     speak("Speak the name of a mode now.");
-//     startListening();
-//   };
-
-//   // 3. Command Handler
-//   const handleVoiceCommand = (transcript) => {
-//     const command = transcript.toLowerCase();
-//     console.log("Drishti Heard:", command);
-
-//     for (const [key, mode] of Object.entries(MODES)) {
-//       if (command.includes(mode.label.toLowerCase()) || command.includes(key.toLowerCase())) {
-//         setCurrentMode(key);
-//         speak(`${mode.label} activated. System starting.`);
-        
-//         if (key === "SILENT") setIsMuted(true);
-//         else setIsMuted(false);
-        
-//         stopListening();
-//         return;
-//       }
-//     }
-
-//     if (command.includes("stop") || command.includes("silent")) {
-//       setCurrentMode("SILENT");
-//       setIsMuted(true);
-//       speak("Silent mode activated.");
-//     }
-//   };
-
-//   // 4. Recognition Lifecycle
-//   const startListening = () => {
-//     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-//     if (!SpeechRecognition || isListening) return;
-
-//     const recognition = new SpeechRecognition();
-//     recognition.continuous = true;
-//     recognition.interimResults = false;
-//     recognition.lang = 'en-US';
-
-//     recognition.onstart = () => setIsListening(true);
-//     recognition.onresult = (event) => {
-//       const transcript = event.results[event.results.length - 1][0].transcript;
-//       handleVoiceCommand(transcript);
-//     };
-//     recognition.onend = () => setIsListening(false);
-
-//     recognitionRef.current = recognition;
-//     recognition.start();
-//   };
-
-//   const stopListening = () => {
-//     if (recognitionRef.current) {
-//       recognitionRef.current.stop();
-//     }
-//   };
-
-//   // 5. Interaction Listeners (Keyboard + Double Tap)
-//   useEffect(() => {
-//     const handleKeyDown = (e) => {
-//       if (e.key.toLowerCase() === 's') {
-//         setCurrentMode("SILENT");
-//         setIsMuted(true);
-//         speak("Silent mode activated. Listening for new mode.");
-//         startListening();
-//       }
-//     };
-
-//     window.addEventListener('keydown', handleKeyDown);
-//     return () => window.removeEventListener('keydown', handleKeyDown);
-//   }, []);
-
-//   const handleScreenInteraction = () => {
-//     // This is called by the double-tap logic in the main view
-//     speak("System paused. Listening for command.");
-//     startListening();
-//   };
-
-//   return { speak, playStartupSequence, handleScreenInteraction, isListening };
-// }

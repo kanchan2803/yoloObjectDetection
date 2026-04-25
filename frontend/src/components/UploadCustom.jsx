@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Navbar, { BottomNav } from './Navbar';
 import Icon from './Icon';
+import { inferBaseLabelFromImage } from '../utils/customObjectMatcher';
 
 export default function UploadCustom() {
   const navigate = useNavigate();
@@ -11,18 +12,40 @@ export default function UploadCustom() {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [baseLabel, setBaseLabel] = useState('');
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
 
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (file) {
       setSelectedImage(file);
-      setPreviewUrl(URL.createObjectURL(file));
+      const objectUrl = URL.createObjectURL(file);
+      setPreviewUrl(objectUrl);
+      setIsAnalyzingImage(true);
+
+      const image = new Image();
+      image.onload = async () => {
+        try {
+          const detectedBaseLabel = await inferBaseLabelFromImage(image);
+          setBaseLabel(detectedBaseLabel);
+        } catch (error) {
+          console.error('Unable to infer object category', error);
+          setBaseLabel('unknown');
+        } finally {
+          setIsAnalyzingImage(false);
+        }
+      };
+      image.src = objectUrl;
     }
   };
 
   const clearImage = () => {
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
     setSelectedImage(null);
     setPreviewUrl(null);
+    setBaseLabel('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -35,6 +58,7 @@ export default function UploadCustom() {
     const formData = new FormData();
     formData.append('image', selectedImage);
     formData.append('label', objectName);
+    formData.append('baseLabel', baseLabel || 'unknown');
 
     const token = localStorage.getItem('token');
 
@@ -88,7 +112,7 @@ export default function UploadCustom() {
       <Navbar />
 
       <main style={{ paddingTop: 96, paddingBottom: 80 }} className="fade-in">
-        <div style={{ maxWidth: 560, margin: '0 auto', padding: '0 24px', display: 'flex', flexDirection: 'column', gap: 32 }}>
+        <div className="upload-custom-layout" style={{ maxWidth: 560, margin: '0 auto', padding: '0 24px', display: 'flex', flexDirection: 'column', gap: 32 }}>
           {/* Back link */}
           <button
             onClick={() => navigate('/profile')}
@@ -104,7 +128,7 @@ export default function UploadCustom() {
           </button>
 
           {/* Header */}
-          <header style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 16 }}>
+          <header className="upload-custom-header" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 16 }}>
             <div style={{
               width: 80, height: 80, borderRadius: 16,
               background: 'rgba(170,199,255,0.1)',
@@ -121,7 +145,7 @@ export default function UploadCustom() {
           </header>
 
           {/* Form card */}
-          <div className="card" style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 32 }}>
+          <div className="card upload-custom-card" style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 32 }}>
             {/* Object name */}
             <div className="input-group">
               <label htmlFor="objectName" className="input-label">
@@ -134,6 +158,11 @@ export default function UploadCustom() {
                 placeholder="e.g. Favorite Coffee Mug"
                 required
               />
+              <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--outline)' }}>
+                {isAnalyzingImage
+                  ? 'Analyzing image category offline...'
+                  : `Generic fallback label: ${baseLabel || 'not detected yet'}`}
+              </p>
             </div>
 
             {/* Photo upload */}
@@ -209,13 +238,18 @@ export default function UploadCustom() {
                 type="button"
                 onClick={handleSubmit}
                 className="btn btn-primary btn-lg"
-                disabled={isUploading || !selectedImage || !objectName}
-                style={{ opacity: (isUploading || !selectedImage || !objectName) ? 0.5 : 1 }}
+                disabled={isUploading || isAnalyzingImage || !selectedImage || !objectName}
+                style={{ opacity: (isUploading || isAnalyzingImage || !selectedImage || !objectName) ? 0.5 : 1 }}
               >
                 {isUploading ? (
                   <>
                     <Icon name="progress_activity" size={20} style={{ animation: 'spin 1s linear infinite' }} />
                     Uploading...
+                  </>
+                ) : isAnalyzingImage ? (
+                  <>
+                    <Icon name="progress_activity" size={20} style={{ animation: 'spin 1s linear infinite' }} />
+                    Analyzing...
                   </>
                 ) : (
                   <>

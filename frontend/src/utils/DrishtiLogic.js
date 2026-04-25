@@ -47,6 +47,8 @@ export const processDetections = (indices, boxes, scores, classes, currentMode, 
 
     detections.push({
       ...obj,
+      baseLabel: obj.label,
+      displayLabel: obj.label,
       distance,
       direction,
       displayText: `${distance} ${obj.label} at ${direction}`,
@@ -54,18 +56,4 @@ export const processDetections = (indices, boxes, scores, classes, currentMode, 
   });
 
   return { detections, isPathClear };
-};
-
-/**
- * Formats the count mode announcement
- */
-export const getCountAnnouncement = (detections) => {
-  const counts = {};
-  detections.forEach(d => {
-    counts[d.label] = (counts[d.label] || 0) + 1;
-  });
-  
-  return Object.entries(counts)
-    .map(([label, count]) => `${count} ${label}${count > 1 ? 's' : ''}`)
-    .join(", ");
 };
