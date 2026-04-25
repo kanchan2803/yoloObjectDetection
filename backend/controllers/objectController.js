@@ -17,10 +17,28 @@ export const uploadObject = async (req, res) => {
 
     await newObject.save();
 
-    res.status(201).json({ 
-      message: 'Custom object saved successfully!', 
-      object: newObject 
-    });
+      // Trigger face embedding extraction in the Python service
+      // We do this async — don't block the upload response
+      try {
+        await fetch('http://localhost:5001/register-face', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imagePath: req.file.path,
+            label,
+            userId: userId.toString(),
+            objectId: newObject._id.toString()
+          })
+        });
+      } catch (err) {
+        // Python service might not be running — log but don't fail the upload
+        console.warn('Face registration skipped (Python service offline):', err.message);
+      }
+
+      res.status(201).json({ 
+        message: 'Custom object saved successfully!', 
+        object: newObject 
+      });
   } catch (error) {
     console.error("Upload Error:", error);
     res.status(500).json({ message: 'Server error during upload' });

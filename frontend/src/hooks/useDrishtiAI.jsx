@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import { MODES, COCO_CLASSES } from '../components/DrishtiConstants';
 import { processDetections } from '../utils/DrishtiLogic';
+import useCustomObjects from './useCustomObjects';
 
 export default function useDrishtiAI(videoRef, speak, lastSpokenRef) {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
@@ -9,6 +10,8 @@ export default function useDrishtiAI(videoRef, speak, lastSpokenRef) {
   const [activeDetections, setActiveDetections] = useState([]);
   const [isPathSafe, setIsPathSafe] = useState(true);
   const [confidence, setConfidence] = useState(0);
+
+  const { customObjects, matchCrop } = useCustomObjects();
   
   const modelRef = useRef(null);
   const lastTime = useRef(Date.now());
@@ -132,21 +135,48 @@ export default function useDrishtiAI(videoRef, speak, lastSpokenRef) {
         }];
       }
 
-      // 5. Update State
-      setActiveDetections(filtered);
+      // --- CUSTOM OBJECT MATCHING ---
+// For each YOLO detection, crop that region from the video frame and
+// check if it visually matches any user-uploaded reference image
+if (customObjects.length > 0 && video.readyState === 4) {
+  const matchCanvas = document.createElement('canvas');
+  const matchCtx = matchCanvas.getContext('2d');
 
-    //   // 4. Smart Filtering
-    //   // This ensures we don't ignore critical objects even if they aren't in the mode's 'whitelist'
-    //   const filtered = detections.filter(d => {
-    //     const isWhitelisted = config.activeClasses.length === 0 || config.activeClasses.includes(d.label);
-    //     const isHighConfidence = d.confidence > 0.65; // Override: If it's very sure, show it anyway.
-        
-    //     return isWhitelisted || isHighConfidence;
-    //   });
+  filtered = filtered.map(det => {
+    if (det.label === 'person') return det;
+    
+    // Convert YOLO's center+size coords to pixel coords on the actual video
+    const vW = video.videoWidth;
+    const vH = video.videoHeight;
+    const scaleX = vW / 640;
+    const scaleY = vH / 640;
 
-    //   // 5. Update State
-    //   setActiveDetections(filtered);
-    // //   setIsPathSafe(isPathClear);
+    const x = (det.cx - det.w / 2) * scaleX;
+    const y = (det.cy - det.h / 2) * scaleY;
+    const w = det.w * scaleX;
+    const h = det.h * scaleY;
+
+    // Draw only the bounding-box region into a temp canvas
+    matchCanvas.width = w;
+    matchCanvas.height = h;
+    matchCtx.drawImage(video, x, y, w, h, 0, 0, w, h);
+
+    // Compare that crop against user reference images
+    const match = matchCrop(matchCanvas);
+    if (match) {
+      // Override the YOLO label with the user's custom label
+      return {
+        ...det,
+        label: match.label,
+        displayText: `${det.distance} ${match.label} at ${det.direction} (yours)`,
+        isCustom: true
+      };
+    }
+    return det;
+  });
+}
+
+setActiveDetections(filtered);
 
 if (currentMode === "PATHFINDER") {
         // 1. Identify objects in the "Critical Corridor" (Center 40%)

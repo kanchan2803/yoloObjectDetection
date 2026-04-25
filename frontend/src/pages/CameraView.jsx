@@ -5,6 +5,7 @@ import useDrishtiVoice from '../hooks/useDrishtiVoice';
 import { MODES } from '../components/DrishtiConstants';
 import Navbar from '../components/Navbar';
 import Icon from '../components/Icon';
+import useFaceIdentification from '../hooks/useFaceIdentification';
 
 export default function CameraView() {
   const navigate = useNavigate();
@@ -47,6 +48,8 @@ export default function CameraView() {
   const { isModelLoaded, fps, activeDetections, isPathSafe, confidence, runInference } = useDrishtiAI(
     videoRef, speak, lastSpokenRef
   );
+
+  const { identifyFace } = useFaceIdentification();
 
   // 1. Startup Logic
   useEffect(() => {
@@ -132,8 +135,7 @@ export default function CameraView() {
       const drawH = (det.h * aiScaleY) * scale;
 
       const isUrgent = det.distance === "Very Near" || det.distance === "Near";
-      ctx.strokeStyle = isUrgent ? "#FFB4AB" : "#AAC7FF";
-      ctx.lineWidth = 2;
+ctx.strokeStyle = det.isCustom ? "#FFD700" : (isUrgent ? "#FFB4AB" : "#AAC7FF");      ctx.lineWidth = 2;
       ctx.setLineDash(isUrgent ? [] : [5, 5]);
       ctx.strokeRect(x, y, drawW, drawH);
 
@@ -150,7 +152,9 @@ export default function CameraView() {
   }, [activeDetections, isSystemActive]);
 
   // 4. Audio Feedback
-  useEffect(() => {
+useEffect(() => {
+  // async wrapper needed because identifyFace is async
+  const run = async () => {
     if (currentMode === "PATHFINDER") return;
 
     if (isMuted || activeDetections.length === 0 || !isSystemActive) return;
@@ -161,6 +165,15 @@ export default function CameraView() {
     if (currentTime - lastSpokenRef.current > cooldown) {
       const topObject = activeDetections[0];
       let message = topObject.displayText;
+
+      // If it's a person detection, try to identify them
+if (topObject.label === 'person' && videoRef.current) {
+  const match = await identifyFace(videoRef.current, topObject);
+  if (match) {
+    message = `${topObject.distance} — that's ${match.label}, ${Math.round(match.confidence)}% confident`;
+  }
+}
+
       if (modeConfig.prefix) message = `${modeConfig.prefix} ${message}`;
       if (!isPathSafe && currentMode !== "SILENT") message = `Stop! ${message}`;
 
@@ -175,7 +188,8 @@ export default function CameraView() {
       };
       setEventLog(prev => [newEntry, ...prev].slice(0, 20));
     }
-  }, [activeDetections, isMuted, currentMode, isPathSafe, isSystemActive]);
+  }
+  run()}, [activeDetections, isMuted, currentMode, isPathSafe, isSystemActive , identifyFace, lastSpokenRef, speak]);
 
   const handleManualModeSelection = (m) => {
     setCurrentMode(m);
