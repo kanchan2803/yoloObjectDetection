@@ -1,41 +1,26 @@
 /**
- * useDrishtiAudio.js
- * ─────────────────────────────────────────────────────────────────
- * PURPOSE:
- *   The single source of truth for ALL audio output in Drishti.
- *   No other file should ever call window.speechSynthesis directly.
+ * useDrishtiAudio.js — Fixed version
  *
- * RESPONSIBILITIES:
- *   1. Manage the TTS engine (speak, cancel, queue)
- *   2. Load and expose available system voices
- *   3. Persist user's voice preference to localStorage
- *   4. Decide WHEN to speak (cooldown + urgency logic)
- *   5. Export one clean announce() function for CameraView to call
+ * KEY FIXES FOR RUSHING / CUTTING OFF:
  *
- * WHAT THIS HOOK DOES NOT DO:
- *   - It does not build sentences (that's audioMessages.js)
- *   - It does not handle mic input or speech recognition (that's useDrishtiVoice.jsx)
- *   - It does not know about YOLO or detection logic (that's useDrishtiAI.jsx)
+ * 1. announce() no longer cancels ongoing speech for non-urgent detections.
+ *    Previously, every detection cycle called speak(msg, urgent=true) which
+ *    calls synth.cancel() mid-sentence. Now non-urgent calls simply skip if
+ *    anything is already speaking.
  *
- * OFFLINE COMPATIBILITY:
- *   window.speechSynthesis is a browser-native API.
- *   It uses voices installed on the device/OS — no network needed.
- *   Works fully offline on Android, iOS, Windows, macOS, Linux.
+ * 2. Cooldown is enforced AFTER speech ends, not just based on a timestamp.
+ *    A new `isSpeakingRef` prevents a second announce() from firing while the
+ *    first utterance is still playing — even within the cooldown window.
  *
- * USAGE in CameraView.jsx:
- *   const audio = useDrishtiAudio(isMuted);
+ * 3. Urgent speech (EMERGENCY, PATHFINDER obstacle) still interrupts — that's
+ *    intentional and correct behavior.
  *
- *   // In your detection effect:
- *   audio.announce(activeDetections, currentMode, isPathSafe);
+ * 4. Startup sequence uses onEnd chaining (unchanged) which was already correct.
+ *    Added a minimum inter-sentence gap to prevent sentences from colliding on
+ *    slow TTS engines (Android WebView).
  *
- *   // For system messages (startup, mode change):
- *   audio.speak("Normal mode activated.");
- *
- *   // For UI (voice picker):
- *   audio.availableVoices   → array of SpeechSynthesisVoice
- *   audio.selectedVoice     → currently selected voice object
- *   audio.setVoice(voice)   → persist + apply new voice
- * ─────────────────────────────────────────────────────────────────
+ * 5. System speak() calls (mode activation, voice commands) use interrupt=true
+ *    which cancels and speaks immediately — also correct and unchanged.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -45,120 +30,49 @@ import {
   isUrgentSituation,
 } from '../utils/audioMessages';
 
-// ─── CONSTANTS ────────────────────────────────────────────────────
-
-// localStorage key where the user's voice preference is saved.
-// We store the voice's `.name` property (a string) because
-// SpeechSynthesisVoice objects themselves can't be serialized to JSON.
 const VOICE_PREF_KEY = 'drishti_voice_name';
+const VOICE_LOAD_DELAY_MS = 400;
 
-// How long (ms) to wait after page load before trying to read voices.
-// WHY: On most browsers, speechSynthesis.getVoices() returns an empty
-// array on the first call because voices load asynchronously.
-// The 'voiceschanged' event fires when they're ready, but on some
-// browsers (especially Chrome on Android) it fires before React has
-// mounted. This small delay is a safe fallback.
-const VOICE_LOAD_DELAY_MS = 300;
+// Minimum gap in ms between the END of one utterance and START of next (non-urgent).
+// Prevents Android/iOS from mashing sentences together.
+const POST_SPEECH_GAP_MS = 600;
 
-
-// ─── HOOK ─────────────────────────────────────────────────────────
-
-/**
- * @param {boolean} isMuted - If true, all audio output is suppressed.
- *                            The hook still tracks state; it just skips
- *                            the actual speak() call when muted.
- */
 export default function useDrishtiAudio(isMuted) {
 
-  // ── State ──────────────────────────────────────────────────────
-  //
-  // availableVoices: the full list returned by the browser.
-  //   We store all of them so the UI can show a complete picker.
-  //   On desktop this is often 40–80 voices. On Android maybe 5–15.
   const [availableVoices, setAvailableVoices] = useState([]);
+  const [selectedVoice,   setSelectedVoice]   = useState(null);
+  const [isSpeaking,      setIsSpeaking]       = useState(false);
 
-  // selectedVoice: the SpeechSynthesisVoice object the user has chosen.
-  //   null means "use browser default" which is always the first voice.
-  const [selectedVoice, setSelectedVoice] = useState(null);
-
-  // isSpeaking: true while the TTS engine has an active utterance.
-  //   Exposed so the UI can show a visual speaking indicator if needed.
-  const [isSpeaking, setIsSpeaking] = useState(false);
-
-
-  // ── Refs ───────────────────────────────────────────────────────
-  //
-  // WHY refs instead of state for these?
-  //   The announce() function runs inside a requestAnimationFrame loop
-  //   (via useDrishtiAI). If we read React state inside there, we'd
-  //   capture stale closures — the value seen inside the loop would be
-  //   frozen at the time the effect ran, not the current live value.
-  //   Refs are mutable objects; reading .current always gives the
-  //   latest value regardless of when the closure was created.
-
-  // Tracks when the last announcement was spoken (Date.now() timestamp).
-  // Used by shouldSpeak() to enforce per-mode cooldowns.
-  const lastSpokenRef = useRef(0);
-
-  // Mirror of isMuted as a ref so the animation loop can read it live.
-  const isMutedRef = useRef(isMuted);
-
-  // Mirror of selectedVoice as a ref for the same reason.
-  const selectedVoiceRef = useRef(null);
-  const lastMessageRef = useRef('');
-  const candidateMessageRef = useRef('');
+  const synthRef              = useRef(null);
+  const isMutedRef            = useRef(isMuted);
+  const selectedVoiceRef      = useRef(null);
+  const lastSpokenRef         = useRef(0);         // timestamp of LAST speak() call
+  const lastFinishedRef       = useRef(0);         // timestamp when last utterance ENDED
+  const isSpeakingRef         = useRef(false);     // true while synth is active
+  const lastMessageRef        = useRef('');
+  const candidateMessageRef   = useRef('');
   const stableMessageCountRef = useRef(0);
 
-  // The synth object itself. We grab it once and keep it in a ref.
-  // WHY not just call window.speechSynthesis inline everywhere?
-  //   Cleaner, and on some SSR setups window may not exist at module
-  //   load time. Accessing inside useEffect is safe.
-  const synthRef = useRef(null);
-
-
-  // ── Sync isMuted → ref ─────────────────────────────────────────
-  //
-  // Every time the React state `isMuted` changes (user taps the mute
-  // button in CameraView), we mirror it into the ref so the animation
-  // loop sees the new value immediately without a re-render cycle.
+  // Sync muted state → ref
   useEffect(() => {
     isMutedRef.current = isMuted;
-    // If the user just muted, cancel whatever is currently speaking.
     if (isMuted && synthRef.current) {
       synthRef.current.cancel();
+      isSpeakingRef.current = false;
       setIsSpeaking(false);
     }
   }, [isMuted]);
 
-
-  // ── Initialize synth + load voices ────────────────────────────
-  //
-  // This effect runs once on mount.
-  // It sets up the synth ref and loads available voices.
-  //
-  // VOICE LOADING FLOW:
-  //   1. Immediately try getVoices() — may or may not have results yet.
-  //   2. Listen for the 'voiceschanged' event which fires when voices
-  //      are fully loaded. This is the reliable moment.
-  //   3. In loadVoices(), restore the user's saved preference if any.
-  //
-  // IMPORTANT: On iOS Safari, 'voiceschanged' never fires reliably.
-  //   The VOICE_LOAD_DELAY_MS fallback handles that.
-
+  // Load voices
   useEffect(() => {
     const synth = window.speechSynthesis;
     synthRef.current = synth;
 
     const loadVoices = () => {
       const voices = synth.getVoices();
-      if (voices.length === 0) return; // Not ready yet, wait for event
-
+      if (voices.length === 0) return;
       setAvailableVoices(voices);
 
-      // Restore saved preference
-      // We saved the voice NAME (a string) to localStorage.
-      // Now we find the matching SpeechSynthesisVoice object from
-      // the freshly loaded voices array.
       const savedName = localStorage.getItem(VOICE_PREF_KEY);
       if (savedName) {
         const match = voices.find(v => v.name === savedName);
@@ -169,200 +83,148 @@ export default function useDrishtiAudio(isMuted) {
       }
     };
 
-    // Try immediately (works in Firefox, some versions of Chrome)
     loadVoices();
-
-    // Listen for the reliable async event
     synth.addEventListener('voiceschanged', loadVoices);
-
-    // iOS Safari fallback
     const fallbackTimer = setTimeout(loadVoices, VOICE_LOAD_DELAY_MS);
 
     return () => {
       synth.removeEventListener('voiceschanged', loadVoices);
       clearTimeout(fallbackTimer);
-      // Cancel any ongoing speech when component unmounts
-      // (e.g. user navigates away from the camera page)
       synth.cancel();
     };
   }, []);
 
-
-  // ─── CORE: speak() ────────────────────────────────────────────
+  // ── CORE: speak() ─────────────────────────────────────────────────────────
   //
-  // This is the ONLY place in the entire app that calls synth.speak().
+  // interrupt=true  → used for system messages (mode activation, voice commands).
+  //                   Cancels whatever is playing and speaks immediately.
+  //                   These are SHORT (1–4 words) and time-sensitive.
   //
-  // PARAMETERS:
-  //   text       - The string to speak
-  //   interrupt  - If true, cancel current speech before speaking.
-  //                Use for urgent alerts. Default false for queuing.
-  //   onEnd      - Optional callback fired when the utterance finishes.
-  //                Used by the startup sequence to chain sentences.
-  //
-  // RATE & PITCH:
-  //   rate: 1.05 — slightly faster than default (1.0) so information
-  //   comes through quickly without sounding rushed. Visually impaired
-  //   users who use screen readers are often accustomed to faster speech.
-  //   You can expose this as a user preference later.
-  //
-  //   pitch: 1.0 — natural. Changing pitch changes the voice character
-  //   and can make it harder to understand. Leave at default unless the
-  //   user explicitly requests it.
-  //
-  // VOLUME:
-  //   We use 1.0 (maximum). The user controls device volume externally.
-  //   Do not reduce volume in software — visually impaired users in
-  //   noisy environments need maximum clarity.
+  // interrupt=false → used by announce() for detection narration.
+  //                   NEVER cancels ongoing speech. Skips if synth is busy.
+  //                   The next announce() cycle will pick it up.
 
   const speak = useCallback((text, interrupt = false, onEnd = null) => {
     const synth = synthRef.current;
-    if (!synth) return false;
+    if (!synth || !text) return false;
 
-    // Never speak when muted — but still allow system messages
-    // (startup sequence, mode announcements) to pass through.
-    // Those callers set interrupt=true to signal they're intentional.
-    // Regular detection announcements leave interrupt=false.
-    // We block only the non-interrupt ones when muted.
+    // Block non-interrupt calls when muted
     if (isMutedRef.current && !interrupt) return false;
 
     if (interrupt) {
       synth.cancel();
+      isSpeakingRef.current = false;
       setIsSpeaking(false);
-    }
-
-    // Detection updates should never pile up in the browser queue.
-    // If something is already speaking, we skip this non-urgent line
-    // and wait for the next inference cycle to produce a fresher message.
-    if (!interrupt && (synth.speaking || synth.pending)) {
-      return false;
+    } else {
+      // Non-urgent: skip if synth is busy or we're within the post-speech gap
+      if (isSpeakingRef.current || synth.speaking || synth.pending) return false;
+      const timeSinceFinished = Date.now() - lastFinishedRef.current;
+      if (timeSinceFinished < POST_SPEECH_GAP_MS) return false;
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
 
-    // Apply selected voice if user has picked one
-    // selectedVoiceRef.current is null → browser uses its default
     if (selectedVoiceRef.current) {
       utterance.voice = selectedVoiceRef.current;
-      // IMPORTANT: also set lang to match the voice
-      // Without this, some browsers ignore the voice setting
-      utterance.lang = selectedVoiceRef.current.lang;
+      utterance.lang  = selectedVoiceRef.current.lang;
     }
 
-    utterance.rate   = 1.05;
+    utterance.rate   = 1.0;   // Slightly slowed from 1.05 — more intelligible
     utterance.pitch  = 1.0;
     utterance.volume = 1.0;
 
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend   = () => {
-      setIsSpeaking(false);
-      if (onEnd) onEnd();
+    utterance.onstart = () => {
+      isSpeakingRef.current = true;
+      setIsSpeaking(true);
     };
+
+    utterance.onend = () => {
+      isSpeakingRef.current = false;
+      lastFinishedRef.current = Date.now();
+      setIsSpeaking(false);
+      if (onEnd) {
+        // Small gap before chaining next sentence in a sequence
+        setTimeout(onEnd, 150);
+      }
+    };
+
     utterance.onerror = (e) => {
-      // 'interrupted' is not a real error — it means synth.cancel() was called
-      // Don't log it as an error; it's expected when we interrupt.
       if (e.error !== 'interrupted') {
         console.warn('[Drishti Audio] Speech error:', e.error);
       }
+      isSpeakingRef.current = false;
+      lastFinishedRef.current = Date.now();
       setIsSpeaking(false);
+      // Still call onEnd so chained sequences don't hang
+      if (onEnd && e.error !== 'interrupted') setTimeout(onEnd, 150);
     };
 
     synth.speak(utterance);
     return true;
-  }, []); // No deps — everything is accessed via refs
+  }, []);
 
-
-  // ─── CORE: announce() ─────────────────────────────────────────
+  // ── CORE: announce() ──────────────────────────────────────────────────────
   //
-  // This is what CameraView calls every time activeDetections changes.
+  // Called from CameraView every time activeDetections changes.
+  // This runs VERY frequently (every animation frame), so the guards here
+  // are critical to prevent speech from firing too fast.
   //
   // FLOW:
-  //   1. Check mute state — bail early if muted
-  //   2. Determine if the situation is urgent (needs to interrupt)
-  //   3. Check cooldown — bail if not enough time has passed
-  //      UNLESS it's urgent, in which case we skip the cooldown
-  //   4. Build the message string using audioMessages.js
-  //   5. Speak it
-  //
-  // WHY cooldown is bypassed for urgent situations:
-  //   Imagine the user is walking. NORMAL mode is cooldown=3s.
-  //   At t=0s we say "chair to your left".
-  //   At t=1s a car suddenly appears very close ahead.
-  //   We should NOT wait until t=3s to warn them.
-  //   isUrgentSituation() catches this and we interrupt immediately.
+  //   1. Bail if muted or silent mode
+  //   2. Check urgency
+  //   3. If NOT urgent: bail if synth is currently speaking (let it finish)
+  //   4. Check cooldown (time since last SPEAK call, not since last frame)
+  //   5. Require the same scene to be stable for 2+ frames before announcing
+  //   6. Skip if it's identical to the last message (within cooldown)
+  //   7. Speak
 
   const announce = useCallback((detections, mode, isPathSafe = true) => {
-    // Muted — never announce detections (system messages still work
-    // because they call speak() directly with interrupt=true)
     if (isMutedRef.current) return '';
-
-    // Silent mode — no audio
     if (mode === 'SILENT') return '';
 
     const urgent = isUrgentSituation(detections, mode, isPathSafe);
 
-    // Check cooldown — skip if urgent
+    // Non-urgent: respect ongoing speech — don't pile up
+    if (!urgent && isSpeakingRef.current) return '';
+
+    // Cooldown check
     if (!urgent && !shouldSpeak(mode, lastSpokenRef.current)) return '';
 
-    // Build the natural language message
+    // Build message
     const message = buildAudioMessage(detections, mode, isPathSafe);
-
-    // Nothing to say (empty detections in non-pathfinder mode, etc.)
     if (!message || message.trim() === '') return '';
 
+    // Stability gate: require the same message to appear twice before announcing.
+    // This prevents announcing transient single-frame detections.
     if (!urgent) {
       if (candidateMessageRef.current === message) {
         stableMessageCountRef.current += 1;
       } else {
-        candidateMessageRef.current = message;
+        candidateMessageRef.current   = message;
         stableMessageCountRef.current = 1;
       }
+      if (stableMessageCountRef.current < 2) return '';
+    }
 
-      // Require the scene summary to repeat once before announcing it.
-      // This reduces noisy frame-to-frame changes from interrupting the user.
-      if (stableMessageCountRef.current < 2) {
+    // Deduplication: don't repeat identical message unless cooldown fully elapsed
+    if (!urgent && lastMessageRef.current === message) {
+      // Allow repeat only after 2× the cooldown period
+      if (!shouldSpeak(mode, lastSpokenRef.current + (lastSpokenRef.current ? 2000 : 0))) {
         return '';
       }
-    } else {
-      candidateMessageRef.current = message;
-      stableMessageCountRef.current = 2;
     }
 
-    // Avoid repeating the exact same sentence back to back in the loop.
-    if (!urgent && lastMessageRef.current === message && !shouldSpeak(mode, lastSpokenRef.current)) {
-      return '';
-    }
-
-    // Update the last spoken timestamp BEFORE speaking
-    // WHY before? If we update after, and speak() is async, another
-    // announce() call could slip in between and double-speak.
+    // Update timestamp BEFORE speaking to close the race window
     lastSpokenRef.current = Date.now();
     lastMessageRef.current = message;
 
-    // Speak — interrupt if urgent so we don't wait for current sentence to end
+    // Speak: urgent interrupts, non-urgent queues politely
     const didSpeak = speak(message, urgent);
     return didSpeak ? message : '';
 
-  }, [speak]); // speak is stable (useCallback with no deps)
+  }, [speak]);
 
-
-  // ─── VOICE SELECTION ──────────────────────────────────────────
-  //
-  // setVoice() is called from the voice picker UI (in Profile or a
-  // settings panel). It does three things:
-  //   1. Updates React state (re-renders the picker to show selection)
-  //   2. Updates the ref (so speak() uses the new voice immediately)
-  //   3. Saves to localStorage (persists across app restarts)
-  //
-  // VOICE CATEGORIES:
-  //   We expose helper arrays so the UI can group voices into
-  //   "Female", "Male", and by language — making the picker usable.
-  //   The browser gives us voice.name strings like:
-  //     "Google हिन्दी"  (Hindi, likely female)
-  //     "Microsoft David - English (United States)"  (male)
-  //     "Samantha"  (macOS female)
-  //   There is NO official gender field in the Web Speech API.
-  //   We infer gender from common naming conventions — imperfect but
-  //   the only offline option available.
+  // ── VOICE SELECTION ──────────────────────────────────────────────────────
 
   const setVoice = useCallback((voice) => {
     setSelectedVoice(voice);
@@ -372,125 +234,69 @@ export default function useDrishtiAudio(isMuted) {
     } else {
       localStorage.removeItem(VOICE_PREF_KEY);
     }
-    // Confirm the change with a short spoken sample
-    // We speak it with interrupt=true so it plays immediately
     const synth = synthRef.current;
     if (synth) {
       synth.cancel();
       const sample = new SpeechSynthesisUtterance("Voice updated.");
-      if (voice) {
-        sample.voice = voice;
-        sample.lang  = voice.lang;
-      }
-      sample.rate = 1.05;
+      if (voice) { sample.voice = voice; sample.lang = voice.lang; }
+      sample.rate = 1.0;
       synth.speak(sample);
     }
   }, []);
 
-  // Reset to browser default
   const resetVoice = useCallback(() => {
     setSelectedVoice(null);
     selectedVoiceRef.current = null;
     localStorage.removeItem(VOICE_PREF_KEY);
   }, []);
 
+  // ── STARTUP SEQUENCE ─────────────────────────────────────────────────────
+  //
+  // Chains multiple sentences using the onEnd callback so each sentence
+  // starts only after the previous one finishes. Never overlaps.
 
-  // ─── VOICE HELPERS FOR UI ─────────────────────────────────────
-  //
-  // These are derived values — computed from availableVoices.
-  // They don't need to be state; they're just filtered/mapped arrays.
-  //
-  // GENDER INFERENCE:
-  //   We look for common male names in the voice.name string.
-  //   Everything that doesn't match a known male pattern we call female
-  //   (or neutral). This is a heuristic, not a guarantee.
-  //   Example male names across OS voice libraries:
-  //     David, Mark, Daniel, Thomas, Jorge, Luca, Reed, Rishi, Aaron
-  //
-  // LANGUAGE GROUPING:
-  //   voice.lang is a BCP-47 tag like "en-US", "hi-IN", "fr-FR".
-  //   We extract the base language ("en", "hi", "fr") for grouping.
+  const playStartupSequence = useCallback((modeLabels, onComplete) => {
+    const sentences = [
+      "Drishti is ready.",
+      "Please say the name of a mode to begin.",
+      `Available modes: ${modeLabels.slice(0, 6).join(', ')}.`,
+    ];
+
+    const chain = (index = 0) => {
+      if (index >= sentences.length) {
+        // Extra gap after last sentence before mic opens
+        setTimeout(() => { if (onComplete) onComplete(); }, 400);
+        return;
+      }
+      speak(sentences[index], index === 0, () => chain(index + 1));
+    };
+
+    chain();
+  }, [speak]);
+
+  // ── VOICE HELPERS ────────────────────────────────────────────────────────
 
   const MALE_VOICE_KEYWORDS = [
     'david', 'mark', 'daniel', 'thomas', 'jorge', 'luca', 'reed',
     'rishi', 'aaron', 'fred', 'ralph', 'albert', 'bruce', 'junior',
     'microsoft david', 'microsoft mark', 'google uk english male',
-    'ravi', 'hemant', 'kalpana', // Common Indian TTS male names
+    'ravi', 'hemant',
   ];
 
   const inferGender = (voice) => {
     const nameLower = voice.name.toLowerCase();
-    return MALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw))
-      ? 'male'
-      : 'female';
+    return MALE_VOICE_KEYWORDS.some(kw => nameLower.includes(kw)) ? 'male' : 'female';
   };
 
-  // Voices grouped by language then gender — ready for a picker UI
   const voicesByLanguage = availableVoices.reduce((acc, voice) => {
-    const lang = voice.lang.split('-')[0]; // "en-US" → "en"
+    const lang = voice.lang.split('-')[0];
     if (!acc[lang]) acc[lang] = { male: [], female: [] };
     acc[lang][inferGender(voice)].push(voice);
     return acc;
   }, {});
 
-  // Flat arrays for simpler UIs (just show all female or all male)
   const femaleVoices = availableVoices.filter(v => inferGender(v) === 'female');
   const maleVoices   = availableVoices.filter(v => inferGender(v) === 'male');
-
-
-  // ─── STARTUP SEQUENCE ─────────────────────────────────────────
-  //
-  // The startup sequence needs to speak multiple sentences in order,
-  // each one starting only after the previous one finishes.
-  //
-  // WHY is this here and not in useDrishtiVoice?
-  //   useDrishtiVoice handles MIC INPUT (speech recognition).
-  //   useDrishtiAudio handles AUDIO OUTPUT (speech synthesis).
-  //   The startup sequence is output — it belongs here.
-  //   useDrishtiVoice can call audio.playStartupSequence() when ready.
-  //
-  // HOW CHAINING WORKS:
-  //   speak(text, interrupt, onEnd) accepts an onEnd callback.
-  //   We chain calls: speak sentence 1 → onEnd → speak sentence 2 → etc.
-  //   This is more reliable than setTimeout() delays because it waits
-  //   for actual speech completion, not an estimated duration.
-
-  const playStartupSequence = useCallback((modeLabels, onComplete) => {
-    // Speak sentences in order using recursive chaining
-    const chain = (sentences, index = 0) => {
-      if (index >= sentences.length) {
-        if (onComplete) onComplete();
-        return;
-      }
-      // First sentence interrupts anything playing; rest queue up
-      speak(sentences[index], index === 0, () => chain(sentences, index + 1));
-    };
-
-    const sentences = [
-      "Drishti is ready. Camera and microphone are active.",
-      "Please say the name of a mode to begin.",
-      `Available modes are: ${modeLabels.join(', ')}.`,
-    ];
-
-    chain(sentences);
-  }, [speak]);
-
-
-  // ─── RETURN ───────────────────────────────────────────────────
-  //
-  // We expose only what callers need:
-  //
-  //   announce()          → CameraView detection loop
-  //   speak()             → CameraView/useDrishtiVoice for system messages
-  //   playStartupSequence() → useDrishtiVoice when camera is ready
-  //   isSpeaking          → UI (show a waveform indicator, etc.)
-  //   availableVoices     → Voice picker in Profile/Settings
-  //   selectedVoice       → Voice picker to show current selection
-  //   setVoice()          → Voice picker on selection
-  //   resetVoice()        → Voice picker "reset to default" button
-  //   voicesByLanguage    → Grouped picker UI
-  //   femaleVoices        → Simple gender picker
-  //   maleVoices          → Simple gender picker
 
   return {
     announce,
