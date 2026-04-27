@@ -7,6 +7,7 @@ export default function UploadCustom() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
   const [objectName, setObjectName] = useState('');
+  const [uploadType, setUploadType] = useState('object');
   const [selectedImage, setSelectedImage] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -35,6 +36,7 @@ export default function UploadCustom() {
     const formData = new FormData();
     formData.append('image', selectedImage);
     formData.append('label', objectName);
+    formData.append('type', uploadType);
 
     const token = localStorage.getItem('token');
 
@@ -123,18 +125,65 @@ export default function UploadCustom() {
           {/* Form card */}
           <div className="card" style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 32 }}>
             {/* Object name */}
-            <div className="input-group">
-              <label htmlFor="objectName" className="input-label">
-                <Icon name="sell" size={14} /> Object Name
-              </label>
-              <input
-                type="text" id="objectName" value={objectName}
-                onChange={(e) => setObjectName(e.target.value)}
-                className="input-field"
-                placeholder="e.g. Favorite Coffee Mug"
-                required
-              />
-            </div>
+            {/* Type selector */}
+<div className="input-group">
+  <label className="input-label">
+    <Icon name="category" size={14} /> What are you teaching?
+  </label>
+  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 4 }}>
+    <button
+      type="button"
+      onClick={() => setUploadType('person')}
+      style={{
+        padding: '16px 12px',
+        borderRadius: 12,
+        border: `2px solid ${uploadType === 'person' ? 'var(--primary)' : 'var(--outline-variant)'}`,
+        background: uploadType === 'person' ? 'rgba(170,199,255,0.1)' : 'transparent',
+        color: uploadType === 'person' ? 'var(--primary)' : 'var(--on-surface-variant)',
+        cursor: 'pointer',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+        transition: 'var(--transition)'
+      }}
+    >
+      <Icon name="face" size={28} fill={uploadType === 'person'} />
+      <span style={{ fontSize: 13, fontWeight: 700 }}>Person</span>
+      <span style={{ fontSize: 11, color: 'var(--outline)' }}>Face recognition</span>
+    </button>
+
+    <button
+      type="button"
+      onClick={() => setUploadType('object')}
+      style={{
+        padding: '16px 12px',
+        borderRadius: 12,
+        border: `2px solid ${uploadType === 'object' ? 'var(--primary)' : 'var(--outline-variant)'}`,
+        background: uploadType === 'object' ? 'rgba(170,199,255,0.1)' : 'transparent',
+        color: uploadType === 'object' ? 'var(--primary)' : 'var(--on-surface-variant)',
+        cursor: 'pointer',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+        transition: 'var(--transition)'
+      }}
+    >
+      <Icon name="inventory_2" size={28} fill={uploadType === 'object'} />
+      <span style={{ fontSize: 13, fontWeight: 700 }}>Object</span>
+      <span style={{ fontSize: 11, color: 'var(--outline)' }}>Visual matching</span>
+    </button>
+  </div>
+</div>
+
+{/* Object name */}
+<div className="input-group">
+  <label htmlFor="objectName" className="input-label">
+    <Icon name="sell" size={14} /> {uploadType === 'person' ? 'Person\'s Name' : 'Object Name'}
+  </label>
+  <input
+    type="text" id="objectName" value={objectName}
+    onChange={(e) => setObjectName(e.target.value)}
+    className="input-field"
+    placeholder={uploadType === 'person' ? 'e.g. Mom, John' : 'e.g. Favorite Coffee Mug'}
+    required
+  />
+</div>
 
             {/* Photo upload */}
             <div className="input-group">
@@ -194,14 +243,18 @@ export default function UploadCustom() {
 
             {/* Training tip */}
             <div className="info-card">
-              <Icon name="info" size={22} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-              <div>
-                <p style={{ fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>Training Tip</p>
-                <p style={{ fontSize: 12, color: 'var(--on-surface-variant)', margin: 0, lineHeight: 1.6 }}>
-                  Ensure good lighting and a clear background. The AI learns faster when you provide consistent visual context.
-                </p>
-              </div>
-            </div>
+  <Icon name="info" size={22} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+  <div>
+    <p style={{ fontSize: 14, fontWeight: 700, margin: '0 0 4px' }}>
+      {uploadType === 'person' ? 'Face Recognition Tip' : 'Training Tip'}
+    </p>
+    <p style={{ fontSize: 12, color: 'var(--on-surface-variant)', margin: 0, lineHeight: 1.6 }}>
+      {uploadType === 'person'
+        ? 'Use a clear front-facing photo with good lighting. One photo per person is enough. Sunglasses or masks will prevent recognition.'
+        : 'Ensure good lighting and a clear background. The AI learns faster when you provide consistent visual context.'}
+    </p>
+  </div>
+</div>
 
             {/* Actions */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8 }}>

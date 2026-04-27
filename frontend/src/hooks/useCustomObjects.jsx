@@ -4,6 +4,7 @@ export default function useCustomObjects() {
   const [customObjects, setCustomObjects] = useState([]);
   // Each entry: { label, imageBitmap }
   const loadedRefs = useRef([]);
+  const personRefs = useRef([]);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -26,15 +27,17 @@ export default function useCustomObjects() {
             const imgRes = await fetch(imgUrl);
             const blob = await imgRes.blob();
             const bitmap = await createImageBitmap(blob);
-            return { label: obj.label, bitmap };
+          return { label: obj.label, bitmap, type: obj.type || 'object' };
           } catch {
             return null;
           }
         })
       );
 
-      loadedRefs.current = loaded.filter(Boolean);
-      setCustomObjects(loadedRefs.current);
+      const all = loaded.filter(Boolean);
+      loadedRefs.current = all.filter(o => o.type === 'object');
+      personRefs.current = all.filter(o => o.type === 'person');
+      setCustomObjects(all);
     };
 
     load();
@@ -77,7 +80,7 @@ export default function useCustomObjects() {
     return bestScore >= threshold ? { label: bestLabel, score: bestScore } : null;
   };
 
-  return { customObjects, matchCrop };
+  return { customObjects, personRefs, matchCrop };
 }
 
 // Normalized cross-correlation: returns 0 (no match) to 1 (perfect match)

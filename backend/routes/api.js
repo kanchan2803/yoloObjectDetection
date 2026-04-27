@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 
 // Import our named controller functions
 import { register, login } from '../controllers/authController.js';
-import { uploadObject , getObjects } from '../controllers/objectController.js';
+import { uploadObject, getObjects, deleteObject } from '../controllers/objectController.js';
 
 const router = express.Router();
 
@@ -34,5 +34,6 @@ const authenticateToken = (req, res, next) => {
 router.post('/register', register);
 router.post('/login', login);
 router.post('/upload', authenticateToken, upload.single('image'), uploadObject);
+router.delete('/objects/:id', authenticateToken, deleteObject);
 router.get('/objects', authenticateToken, getObjects);
 export default router;

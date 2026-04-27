@@ -50,6 +50,9 @@ export default function useFaceIdentification() {
       });
 
       const data = await res.json();
+      console.log('[Face ID]', data.match 
+  ? `Matched: ${data.match.label} at ${data.match.confidence}%` 
+  : 'No match / no face found');
       return data.match; // { label, confidence } or null
 
     } catch (err) {
