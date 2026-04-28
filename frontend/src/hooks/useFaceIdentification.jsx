@@ -1,5 +1,6 @@
 import { useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { apiUrl } from '../config/api';
 
 export default function useFaceIdentification() {
   const { user } = useAuth();
@@ -39,12 +40,13 @@ export default function useFaceIdentification() {
         reader.readAsDataURL(blob);
       });
 
-      // Send to Python service
-      const res = await fetch('http://localhost:5001/identify-face', {
+      const res = await fetch(apiUrl('/api/identify-face'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
-          userId: user.email, // or user._id if available
           image: base64
         })
       });

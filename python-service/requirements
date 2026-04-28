@@ -1,7 +1,8 @@
 flask
 flask-cors
-face-recognition
+deepface
 numpy
 pymongo
 pillow
 python-dotenv
+scipy

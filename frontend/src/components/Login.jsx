@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import Navbar from './Navbar';
 import Icon from './Icon';
+import { apiUrl } from '../config/api';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -20,7 +21,7 @@ export default function Login() {
     setError('');
     setIsLoading(true);
 
-    const endpoint = isRegistering ? 'http://localhost:5000/api/register' : 'http://localhost:5000/api/login';
+    const endpoint = isRegistering ? apiUrl('/api/register') : apiUrl('/api/login');
 
     try {
       const response = await fetch(endpoint, {
@@ -45,7 +46,7 @@ export default function Login() {
       }
     } catch (err) {
       console.error(err);
-      setError('Server is offline. Is your Node backend running?');
+      setError('Could not reach the server. Please try again in a moment.');
     } finally {
       setIsLoading(false);
     }

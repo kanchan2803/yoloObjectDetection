@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import Navbar, { BottomNav } from './Navbar';
 import Icon from './Icon';
+import { apiUrl, assetUrl } from '../config/api';
 
 export default function Profile() {
   const navigate = useNavigate();
@@ -20,7 +21,7 @@ export default function Profile() {
       if (!token) { setIsDataLoading(false); return; }
 
       try {
-        const response = await fetch('http://localhost:5000/api/objects', {
+        const response = await fetch(apiUrl('/api/objects'), {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (response.ok) {
@@ -44,7 +45,7 @@ export default function Profile() {
     const token = localStorage.getItem('token');
 
     try {
-      const response = await fetch(`http://localhost:5000/api/objects/${id}`, {
+      const response = await fetch(apiUrl(`/api/objects/${id}`), {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -142,7 +143,7 @@ export default function Profile() {
       </button>
 
       <img
-        src={`http://localhost:5000/${obj.imagePath.replace(/\\/g, '/')}`}
+        src={assetUrl(obj.imagePath)}
         alt={obj.label}
         style={{ width: '100%', height: 140, objectFit: 'cover', display: 'block' }}
       />

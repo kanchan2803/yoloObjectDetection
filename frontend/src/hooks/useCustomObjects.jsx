@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { apiUrl, assetUrl } from '../config/api';
 
 export default function useCustomObjects() {
   const [customObjects, setCustomObjects] = useState([]);
@@ -12,7 +13,7 @@ export default function useCustomObjects() {
 
     const load = async () => {
       // 1. Fetch the user's saved objects from your backend
-      const res = await fetch('http://localhost:5000/api/objects', {
+      const res = await fetch(apiUrl('/api/objects'), {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!res.ok) return;
@@ -23,7 +24,7 @@ export default function useCustomObjects() {
       const loaded = await Promise.all(
         objects.map(async (obj) => {
           try {
-            const imgUrl = `http://localhost:5000/${obj.imagePath.replace(/\\/g, '/')}`;
+            const imgUrl = assetUrl(obj.imagePath);
             const imgRes = await fetch(imgUrl);
             const blob = await imgRes.blob();
             const bitmap = await createImageBitmap(blob);

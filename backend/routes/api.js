@@ -36,4 +36,25 @@ router.post('/login', login);
 router.post('/upload', authenticateToken, upload.single('image'), uploadObject);
 router.delete('/objects/:id', authenticateToken, deleteObject);
 router.get('/objects', authenticateToken, getObjects);
+router.post('/identify-face', authenticateToken, async (req, res) => {
+  try {
+    const pythonServiceUrl = (process.env.PYTHON_SERVICE_URL || 'http://127.0.0.1:5001').replace(/\/+$/, '');
+
+    const response = await fetch(`${pythonServiceUrl}/identify-face`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: req.user.userId.toString(),
+        image: req.body.image,
+      }),
+    });
+
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.warn('Face identification unavailable:', error.message);
+    res.status(503).json({ match: null, message: 'Face identification service unavailable' });
+  }
+});
+
 export default router;

@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Navbar, { BottomNav } from './Navbar';
 import Icon from './Icon';
+import { apiUrl } from '../config/api';
 
 export default function UploadCustom() {
   const navigate = useNavigate();
@@ -41,7 +42,7 @@ export default function UploadCustom() {
     const token = localStorage.getItem('token');
 
     try {
-      const response = await fetch('http://localhost:5000/api/upload', {
+      const response = await fetch(apiUrl('/api/upload'), {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData
@@ -57,7 +58,7 @@ export default function UploadCustom() {
       }
     } catch (error) {
       console.error(error);
-      alert('Upload failed. Is the server running?');
+      alert('Upload failed. Please try again in a moment.');
     } finally {
       setIsUploading(false);
     }
