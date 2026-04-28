@@ -6,3 +6,4 @@ pymongo
 pillow
 python-dotenv
 scipy
+gunicorn
