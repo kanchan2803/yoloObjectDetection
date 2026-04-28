@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import face_recognition
 import numpy as np
 import os
 from pymongo import MongoClient
@@ -8,6 +7,8 @@ from dotenv import load_dotenv
 import base64
 from PIL import Image
 import io
+import insightface
+from insightface.app import FaceAnalysis
 
 load_dotenv()
 app = Flask(__name__)
@@ -18,12 +19,29 @@ db_name = os.getenv('MONGO_DB_NAME', 'drishti').strip()
 db = client[db_name]
 embeddings_col = db['face_embeddings']
 
+# Load model once at startup — downloads ~300MB ONNX model on first run
+# then cached at /root/.insightface/
+print("[Startup] Loading InsightFace model...")
+face_app = FaceAnalysis(
+    name='buffalo_sc',        # smallest+fastest model: det + recognition
+    providers=['CPUExecutionProvider']
+)
+face_app.prepare(ctx_id=0, det_size=(320, 320))  # 320 is faster than default 640
+print("[Startup] InsightFace ready.")
+
 
 def decode_base64_to_rgb_array(image_b64):
-    """Decode base64 image to RGB numpy array (what face_recognition expects)"""
     image_bytes = base64.b64decode(image_b64)
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     return np.array(image)
+
+
+def cosine_similarity(a, b):
+    a, b = np.array(a), np.array(b)
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
 
 
 @app.route('/health', methods=['GET'])
@@ -43,16 +61,17 @@ def register_face():
 
     try:
         img_array = decode_base64_to_rgb_array(data['image'])
-        
-        # Get face encodings — returns a list, one per face found
-        encodings = face_recognition.face_encodings(img_array)
-        
-        if len(encodings) == 0:
+        # InsightFace expects BGR
+        img_bgr = img_array[:, :, ::-1]
+        faces = face_app.get(img_bgr)
+
+        if len(faces) == 0:
             return jsonify({'error': 'No face detected in image'}), 400
-        
-        # Take the first (most prominent) face
-        embedding = encodings[0].tolist()  # Convert numpy to list for MongoDB storage
-        
+
+        # Take largest face (most prominent)
+        largest = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+        embedding = largest.embedding.tolist()
+
     except Exception as e:
         print(f"[Register] Error: {e}")
         return jsonify({'error': 'Failed to process image'}), 400
@@ -82,51 +101,43 @@ def identify_face():
 
     try:
         img_array = decode_base64_to_rgb_array(data['image'])
-        encodings = face_recognition.face_encodings(img_array)
-        
-        if len(encodings) == 0:
+        img_bgr = img_array[:, :, ::-1]
+        faces = face_app.get(img_bgr)
+
+        if len(faces) == 0:
             return jsonify({'match': None})
-        
-        query_encoding = encodings[0]
-        
+
+        largest = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+        query_embedding = largest.embedding.tolist()
+
     except Exception as e:
-        print(f"[Identify] Error processing image: {e}")
+        print(f"[Identify] Error: {e}")
         return jsonify({'match': None})
 
-    # Load all saved faces for this user
     saved = list(embeddings_col.find({'userId': user_id}))
-    if not saved:
-        return jsonify({'match': None})
-
-    # Filter out any corrupt entries
     valid_saved = [f for f in saved if f.get('embedding') and len(f['embedding']) > 0]
+
     if not valid_saved:
         return jsonify({'match': None})
 
-    # face_recognition uses Euclidean distance — compare_faces uses threshold 0.6
-    # face_distance gives exact distances (lower = more similar)
-    known_encodings = [np.array(f['embedding']) for f in valid_saved]
-    distances = face_recognition.face_distance(known_encodings, query_encoding)
-    
-    best_idx = np.argmin(distances)
-    best_distance = distances[best_idx]
+    similarities = [cosine_similarity(query_embedding, f['embedding']) for f in valid_saved]
+    best_idx = int(np.argmax(similarities))
+    best_similarity = similarities[best_idx]
 
-    # 0.45 is stricter than the default 0.6 — reduces false positives
-    threshold = 0.45
-    
-    debug = {valid_saved[i]['label']: round(float(distances[i]), 3) for i in range(len(valid_saved))}
-    print(f"[Identify] Distances: {debug}")
+    debug = {valid_saved[i]['label']: round(similarities[i], 3) for i in range(len(valid_saved))}
+    print(f"[Identify] Similarities: {debug}")
 
-    if best_distance < threshold:
-        # Convert distance to a confidence percentage
-        confidence = round((1 - (best_distance / threshold)) * 100, 1)
+    # Cosine similarity: 1.0 = identical, threshold 0.4 = reasonably strict
+    threshold = 0.40
+    if best_similarity >= threshold:
+        confidence = round(((best_similarity - threshold) / (1.0 - threshold)) * 100, 1)
         confidence = min(confidence, 99.9)
-        
+
         return jsonify({
             'match': {
                 'label': valid_saved[best_idx]['label'],
                 'confidence': confidence,
-                'distance': float(best_distance)
+                'distance': float(1 - best_similarity)
             }
         })
 
