@@ -21,6 +21,22 @@ embeddings_col = db['face_embeddings']
 MODEL_NAME = "Facenet"
 
 
+def warmup_model():
+    try:
+        print("[Startup] Pre-loading Facenet model...")
+        dummy = np.zeros((112, 112, 3), dtype=np.uint8)
+        DeepFace.represent(
+            img_path=dummy,
+            model_name=MODEL_NAME,
+            enforce_detection=False,
+        )
+        print("[Startup] Facenet model loaded successfully.")
+    except Exception as e:
+        print(f"[Startup] Warmup warning (safe to ignore): {e}")
+
+warmup_model()
+
+
 def decode_base64_to_bgr(image_b64):
     image_bytes = base64.b64decode(image_b64)
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
@@ -42,8 +58,9 @@ def register_face():
             enforce_detection=True,
         )
         embedding = face_objs[0]["embedding"]
-    except ValueError:
-        return jsonify({'error': 'No face found in image'}), 400
+    except Exception as e:
+        print(f"[Register] Face detection failed: {e}")
+        return jsonify({'error': 'No face detected in image'}), 400
 
     embeddings_col.update_one(
         {'objectId': object_id},
@@ -72,14 +89,18 @@ def identify_face():
             enforce_detection=True,
         )
         query_embedding = face_objs[0]["embedding"]
-    except ValueError:
+    except Exception:
         return jsonify({'match': None})
 
     saved = list(embeddings_col.find({'userId': user_id}))
     if not saved:
         return jsonify({'match': None})
 
-    distances = [cosine(query_embedding, saved_face['embedding']) for saved_face in saved]
+    valid_saved = [f for f in saved if f.get('embedding') and len(f['embedding']) > 0]
+    if not valid_saved:
+        return jsonify({'match': None})
+
+    distances = [cosine(query_embedding, f['embedding']) for f in valid_saved]
     best_idx = np.argmin(distances)
     best_distance = distances[best_idx]
 
@@ -87,18 +108,17 @@ def identify_face():
     if best_distance < threshold:
         confidence = round((1 - (best_distance / threshold)) * 100, 1)
         confidence = min(confidence, 99.9)
-
         return jsonify({
             'match': {
-                'label': saved[best_idx]['label'],
+                'label': valid_saved[best_idx]['label'],
                 'confidence': confidence,
                 'distance': float(best_distance)
             }
         })
 
     debug_distances = {
-        saved[i]['label']: round(float(distances[i]), 3)
-        for i in range(len(saved))
+        valid_saved[i]['label']: round(float(distances[i]), 3)
+        for i in range(len(valid_saved))
     }
     print(f"[Face ID] Query distances: {debug_distances}")
     return jsonify({'match': None})
@@ -110,7 +130,7 @@ def delete_face():
     object_id = data['objectId']
 
     result = embeddings_col.delete_one({'objectId': object_id})
-    print(f"[Delete] Removed face embedding for objectId: {object_id}, deleted: {result.deleted_count}")
+    print(f"[Delete] Removed embedding for objectId: {object_id}, deleted: {result.deleted_count}")
 
     return jsonify({'success': True, 'deleted': result.deleted_count})
 
